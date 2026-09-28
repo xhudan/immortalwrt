@@ -1,0 +1,106 @@
+#!/bin/sh
+# bootslot — show or switch the A/B boot slot from a running ImmortalWrt.
+#
+# The QSDK bootloader picks the rootfs slot from a BOOTCONFIG struct in the
+# "0:BOOTCONFIG"/"0:BOOTCONFIG1" mtd partitions. ImmortalWrt has no /proc/boot_info driver,
+# so this edits that struct directly: it flips the rootfs "primaryboot" flag (byte 128) in
+# BOTH copies, written identically from one read of the active copy. Writing both copies
+# identical means the bootloader always sees one consistent flag, so the redundancy/age
+# counter does not need to change (and is left untouched). Verified against the vendor
+# getbinary output: a slot switch changes only the flag byte; there is no content checksum.
+#
+# This image's busybox has no od/hexdump, so the 4-byte magic and the flag byte are matched
+# by their md5/sha256 (whichever hash tool is present) instead of being parsed as numbers.
+#
+# Usage:
+#   bootslot [status]    show the current flag + what the other slot holds
+#   bootslot switch      flip to the other slot (refuses if it holds no valid UBI image)
+#
+# !!! There is NO recovery without UART if you switch to a slot that cannot boot. !!!
+
+FLAG_OFF=128    # byte offset of the rootfs primaryboot flag (this board's BOOTCONFIG layout)
+
+# pick a hash tool that exists here, with the matching precomputed digests of the 4-byte
+# magics and the single flag bytes 0x00 / 0x01.
+if command -v md5sum >/dev/null 2>&1; then
+	HASH=md5sum
+	MAGIC_H=e8370991fc78834b93667db716d19df7   # a0 a1 a2 a3
+	F0_H=93b885adfe0da089cdf634904fd59f71       # 0x00
+	F1_H=55a54008ad1ba589aa210d2629c1df41       # 0x01
+elif command -v sha256sum >/dev/null 2>&1; then
+	HASH=sha256sum
+	MAGIC_H=73b92b68882b199971462a2614c6691cba581da958740466030a64ce7de66ed3
+	F0_H=6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d
+	F1_H=4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a
+else
+	echo "bootslot: need md5sum or sha256sum" >&2; exit 1
+fi
+
+die(){ echo "bootslot: $*" >&2; exit 1; }
+# match the partition label case-insensitively: the QSDK SMEM table is rendered UPPERCASE on
+# the vendor firmware ("0:BOOTCONFIG") but lowercase on ImmortalWrt ("0:bootconfig").
+mtdof(){ grep -i "\"$1\"" /proc/mtd | sed -n 's/^mtd\([0-9][0-9]*\):.*/\1/p' | head -1; }
+hb(){ dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | $HASH | cut -d' ' -f1; }  # hash of $3 bytes at offset $2
+
+bc0=$(mtdof "0:BOOTCONFIG"); bc1=$(mtdof "0:BOOTCONFIG1")
+[ -n "$bc0" ] && [ -n "$bc1" ] || die "no 0:BOOTCONFIG partitions in /proc/mtd — not a QSDK A/B board, nothing to do."
+
+[ "$(hb "/dev/mtd$bc0" 0 4)" = "$MAGIC_H" ] || die "BOOTCONFIG magic mismatch — refusing to touch it."
+
+fh=$(hb "/dev/mtd$bc0" "$FLAG_OFF" 1)
+case "$fh" in
+	"$F0_H") cur=0 ;;
+	"$F1_H") cur=1 ;;
+	*) die "rootfs flag byte is not 0/1 — layout mismatch, refusing." ;;
+esac
+new=$(( 1 - cur ))
+
+# inactive slot (the one that would boot after a switch) = the rootfs-pair mtd ubi0 is NOT on.
+act=$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)
+[ -n "$act" ] || act=$(dmesg 2>/dev/null | sed -n 's/.*ubi0: attached mtd\([0-9][0-9]*\).*/\1/p' | tail -1)
+[ -n "$act" ] || die "cannot determine the running rootfs mtd (ubi0) — refusing to guess the other slot."
+ra=$(mtdof "rootfs"); rb=$(mtdof "rootfs_1")
+if [ "$ra" = "$act" ]; then other=$rb; else other=$ra; fi
+
+# inspect a slot's UBI: prints IMMORTALWRT | OTHER-OS | EMPTY | ERROR  ($1 = mtd num).
+# Identify by VOLUME NAMES, not by magic: the vendor firmware also has a FIT kernel, so a
+# magic check cannot tell it apart. ImmortalWrt has volumes "kernel" + "rootfs" (+rootfs_data);
+# the vendor has "ubi_rootfs"/"wifi_fw"/"bt_fw" instead. Any slot with >=2 volumes is a valid
+# switch target (IMMORTALWRT or OTHER-OS); EMPTY (<2 volumes) or ERROR (won't attach) refused.
+inspect_slot(){
+	ubidetach -d 9 2>/dev/null
+	ubiattach -m "$1" -d 9 >/dev/null 2>&1 || { echo ERROR; return; }
+	vols=$(ubinfo -a -d 9 2>/dev/null | sed -n 's/^Name:[[:space:]]*//p')
+	ubidetach -d 9 2>/dev/null
+	n=$(printf '%s\n' "$vols" | grep -c .); n=${n:-0}
+	if [ "$n" -lt 2 ] 2>/dev/null; then echo EMPTY
+	elif printf '%s\n' "$vols" | grep -qx 'kernel' && printf '%s\n' "$vols" | grep -qx 'rootfs'; then echo IMMORTALWRT
+	else echo OTHER-OS; fi
+}
+
+case "${1:-status}" in
+status)
+	echo "BOOTCONFIG rootfs flag = $cur   (switch would set it to $new)"
+	echo "running rootfs = mtd$act ; the other slot = mtd$other"
+	echo "other slot (mtd$other) contents: $(inspect_slot "$other")"
+	;;
+switch)
+	kind=$(inspect_slot "$other")
+	case "$kind" in
+		IMMORTALWRT|OTHER-OS) ;;
+		*) die "the other slot (mtd$other) looks '$kind' — no valid UBI image there. NOT switching (you would brick with no UART)." ;;
+	esac
+	echo "other slot (mtd$other) holds: $kind"
+	echo "switching rootfs flag $cur -> $new (writing both BOOTCONFIG copies identically)"
+	tmp=/tmp/bootslot.bin
+	dd if="/dev/mtd$bc0" of="$tmp" bs=1 count=336 2>/dev/null
+	printf "$(printf '\\%03o' "$new")" | dd of="$tmp" bs=1 seek="$FLAG_OFF" count=1 conv=notrunc 2>/dev/null
+	mtd write "$tmp" "/dev/mtd$bc0" || die "mtd write BOOTCONFIG failed"
+	mtd write "$tmp" "/dev/mtd$bc1" || die "mtd write BOOTCONFIG1 failed"
+	want=$F0_H; [ "$new" = 1 ] && want=$F1_H
+	[ "$(hb "/dev/mtd$bc0" "$FLAG_OFF" 1)" = "$want" ] || die "readback flag != $new — do NOT reboot, investigate."
+	echo "done — rootfs flag is now $new. Reboot to boot the other slot."
+	echo "(if the other slot does not come up, UART/TFTP is the only recovery.)"
+	;;
+*) echo "usage: bootslot [status|switch]"; exit 1 ;;
+esac

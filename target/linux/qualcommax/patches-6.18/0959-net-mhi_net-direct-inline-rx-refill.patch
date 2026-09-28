@@ -1,0 +1,64 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] net: mhi_net: refill the DL ring in-line from the rx callback
+
+mhi_net only refills the DL ring from a delayed work, and only once the ring
+has drained to half (free_desc_count >= rx_queue_sz / 2). Under sustained
+downlink on a slow, busy SoC (IPQ5018, dual A53) the remaining half is consumed
+by the modem in a few milliseconds - faster than system_wq can schedule the
+worker - so the ring hits empty. A hardware-accelerated modem DL engine
+(Qualcomm SDX IPA on the RG520N) then deadlocks on descriptor starvation and
+never resumes: rx freezes, tx keeps flowing, link stays up, only a modem reset
+recovers it.
+
+Every other high-rate Linux NIC refills its RX ring in-line from the receive
+path, not from a workqueue. Do the same: for each buffer the device just
+consumed, hand one back immediately from the DL callback so the ring never runs
+dry. This is safe - the MHI host drops mhi_chan->lock around the transfer
+callback (parse_xfer_event) and the callback runs in softirq, so
+netdev_alloc_skb()/mhi_queue_skb() can be called directly. The delayed work is
+kept as the fallback for the rare allocation/queue failure, as the vendor
+driver does.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/drivers/net/mhi_net.c
++++ b/drivers/net/mhi_net.c
+@@ -171,9 +171,6 @@
+ {
+ 	struct mhi_net_dev *mhi_netdev = dev_get_drvdata(&mhi_dev->dev);
+ 	struct sk_buff *skb = mhi_res->buf_addr;
+-	int free_desc_count;
+-
+-	free_desc_count = mhi_get_free_desc_count(mhi_dev, DMA_FROM_DEVICE);
+ 
+ 	if (unlikely(mhi_res->transaction_status)) {
+ 		switch (mhi_res->transaction_status) {
+@@ -228,9 +225,25 @@
+ 		__netif_rx(skb);
+ 	}
+ 
+-	/* Refill if RX buffers queue becomes low */
+-	if (free_desc_count >= mhi_netdev->rx_queue_sz / 2)
+-		schedule_delayed_work(&mhi_netdev->rx_refill, 0);
++	/* Refill in-line: hand one buffer back for every one the device just
++	 * consumed so the DL ring never drains. Deferring to the workqueue let
++	 * the ring empty under sustained DL faster than the worker was
++	 * scheduled, starving (and permanently wedging) the modem's hardware DL
++	 * engine. The chan lock is dropped around this callback and we run in
++	 * softirq, so these are safe here; fall back to the work only on an
++	 * actual alloc/queue failure.
++	 */
++	if (!mhi_queue_is_full(mhi_dev, DMA_FROM_DEVICE)) {
++		unsigned int size = mhi_netdev->mru ? mhi_netdev->mru :
++					READ_ONCE(mhi_netdev->ndev->mtu);
++		struct sk_buff *nskb = netdev_alloc_skb(mhi_netdev->ndev, size);
++
++		if (unlikely(!nskb) ||
++		    unlikely(mhi_queue_skb(mhi_dev, DMA_FROM_DEVICE, nskb, size, MHI_EOT))) {
++			kfree_skb(nskb);
++			schedule_delayed_work(&mhi_netdev->rx_refill, 0);
++		}
++	}
+ }
+ 
+ static void mhi_net_ul_callback(struct mhi_device *mhi_dev,

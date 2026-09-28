@@ -1,0 +1,30 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] bus: mhi: pci_generic: enlarge IP_HW0 HW channel rings to 512
+
+The generic modem_qcom_v1 config gives the hardware-accelerated IP_HW0 UL/DL
+channels only 128 ring descriptors. On the Quectel RG520N-EB (SDX6x) over a
+busy IPQ5018 this is too shallow: under sustained downlink the DL ring drains
+below the refill threshold and empties before the host can refill it, and the
+modem's hardware DL (IPA) engine then deadlocks on descriptor starvation and
+stops forever until a modem reset (rx frozen, tx ok, link up).
+
+Qualcomm's own vendor pcie_mhi driver uses 512 (NUM_MHI_IPA_IN/OUT_RING_ELEMENTS),
+and mainline already uses 512 for other SDX6x modems (e.g. the Telit/Sierra
+profiles in this file). Match that: 512 x 16-byte TRE = 8 KiB of ring, trivial
+DMA memory, 4x more headroom for the host to keep the ring fed. The dedicated
+HW DL event ring (2048) already satisfies the "event >= 2x channel" rule.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/drivers/bus/mhi/host/pci_generic.c
++++ b/drivers/bus/mhi/host/pci_generic.c
+@@ -318,8 +318,8 @@ static const struct mhi_channel_config modem_qcom_v1_mhi_channels[] = {
+ 	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
+ 	MHI_CHANNEL_CONFIG_DL(47, "IP_SW0", 64, 3),
+-	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 128, 4),
+-	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 128, 5),
++	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 512, 4),
++	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 512, 5),
+ };
+
+ static struct mhi_event_config modem_qcom_v1_mhi_events[] = {
