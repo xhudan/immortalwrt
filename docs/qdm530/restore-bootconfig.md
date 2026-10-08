@@ -2,8 +2,9 @@
 
 How to overwrite the two `BOOTCONFIG` partitions with a known-good copy when the struct
 itself has been damaged or mangled — e.g. a failed rebuild left the wrong partition names,
-wrong entry order, or inconsistent `primaryboot` flags. This is a **repair of the struct**,
-not a slot switch (see the warning below). Done entirely from a running ImmortalWrt.
+wrong entry order, or inconsistent `primaryboot` flags. This is a **repair of the struct** —
+a separate thing from switching slots (which `bootslot switch` does; see the note below).
+Done entirely from a running ImmortalWrt.
 
 ## What BOOTCONFIG is
 
@@ -35,14 +36,27 @@ A **clean vendor** struct (the reference target of this restore) has these 8 ent
 There is **no checksum** in the struct, so a bad write is not self-detected — verify by
 reading it back (below).
 
-> ### ⚠️ This does NOT switch the boot slot on this board
-> HW-tested (twin, Oct 2026): U-Boot `bootipq` on this board **ignores the `primaryboot`
-> flags** and always boots the physical `rootfs` partition (mtd15). Flipping `rootfs`
-> (and `0:HLOS`) to `1` in both copies, then rebooting, still booted slot 0. So restoring
-> or editing BOOTCONFIG is for **fixing a corrupted struct**, not for choosing which OS
-> runs. To actually change the running OS, write the image into the physical `rootfs`
-> slot (see `build-and-flash.md`) or use UART/U-Boot. Treat any "switch via flag" claim
-> elsewhere in these docs as unverified on this unit.
+> ### ⚠️ Struct-repair vs. slot switch, and why dual-boot is not persistent
+> Switching the boot slot **does work** and is a *separate* operation: `bootslot switch`
+> flips **only** the `rootfs` `primaryboot` flag (byte 128 on a clean struct — never
+> `0:HLOS`), and U-Boot then remaps and boots the other physical slot. HW-confirmed both
+> ways (ImmortalWrt ⇄ vendor, booting a *different OS* from the other slot) — see
+> `boot-slots.md`. An earlier note here claimed the flags were ignored; that was wrong — it
+> came from a test that also flipped `0:HLOS=1`, which U-Boot rejects (`bad offset of hlos`)
+> and falls back. Flip `rootfs` **only**. This BOOTCONFIG restore is for repairing a
+> *corrupted* struct (wrong names/order/flags), not for choosing which OS runs.
+>
+> **The OEM bootloader auto-syncs the two rootfs slots.** `ql_partition_init` in the vendor
+> U-Boot (decoded from the `0:APPSBL` dump) clones one slot over the other when an env flag
+> is set — `sys_recovery=1` ⇒ restore backup→primary (`ubi … rootfs_1 → rootfs`),
+> `sys_upgrade=1` ⇒ mirror primary→backup — and a CRC check sets that flag **automatically**
+> at boot when the two rootfs slots differ. Consequence: a **persistent ImmortalWrt-primary
+> + vendor-backup dual-boot is not stable** — a dormant vendor backup gets restored over the
+> primary (and boots vendor) or wiped on the next boot. HW-confirmed: vendor freshly written
+> to the backup slot + a plain reboot → the board booted vendor. In practice: stable
+> ImmortalWrt = **both** rootfs slots ImmortalWrt; to run vendor, write vendor into a slot
+> and reboot (the bootloader boots/keeps it); to go back, re-flash that slot with ImmortalWrt.
+> Disabling this would require patching `0:APPSBL` (`check_rootfs`), i.e. UART + brick risk.
 
 ## You need a known-good source
 
