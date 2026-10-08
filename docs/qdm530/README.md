@@ -109,7 +109,9 @@ interface is kept only as a control/diagnostic side channel.
   through a QMI-over-QRTR transport (`option device 'qrtr'`), with data on
   rmnet/QMAP (`wwand0@mhi_hwip0`, mux_id 1). Seeded on first boot by
   `base-files/etc/uci-defaults/26_wwand-modem`; set a carrier APN there or in the
-  wwand LuCI UI if the SIM needs one. See `pcie1-modem-combo-phy.md`.
+  wwand LuCI UI if the SIM needs one. See `pcie1-modem-combo-phy.md`, and
+  `modem-wan-troubleshooting.md` for WAN faults (RX=0 / modem stuck in MBIM,
+  `DEVICE_CLAIM_FAILED`, carrier IPv6 refusal, "No Service").
 - **USB (disabled on the board).** The combo PCIe/USB3 PHY is committed to pcie1
   (above), so the USB3 PHY stays off; mainline dwc3 then refuses to register at all
   (there is no USB2-only fallback — `dwc3-qcom: failed to register DWC3 Core`), so the
