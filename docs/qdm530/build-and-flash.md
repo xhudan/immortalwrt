@@ -135,12 +135,24 @@ unit, Oct 2026.)
    cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin
    mtd write /tmp/bc0.bin /dev/mtd2                        # BOOTCONFIG
    mtd write /tmp/bc1.bin /dev/mtd3                        # BOOTCONFIG1 (backup)
+   fw_setenv sys_upgrade 0     # keep vendor as a dual-boot backup (see note below);
+   fw_setenv sys_recovery 0    # omit both lines to mirror ImmortalWrt into both slots
    reboot
    ```
    Optional read-back before rebooting: `dd if=/dev/mtd2 bs=4 count=1 | hexdump -C` → magic
    `a0 a1 a2 a3`. After reboot ImmortalWrt comes up on `192.168.1.1` (new SSH host key). If it
    answers on **neither** the new nor the old IP after ~3 min, the staged slot failed to boot
    → UART/TFTP recovery is required.
+
+   > **What happens to the old vendor slot.** The vendor firmware sets the U-Boot env flag
+   > `sys_upgrade=1` on every boot; on the first boot after this flip the bootloader's
+   > `ql_partition_init` would mirror the now-active ImmortalWrt over the slot you came from and
+   > **overwrite the vendor firmware** (you would end up with ImmortalWrt in *both* slots — a
+   > clean single-OS install with ImmortalWrt A/B). The two `fw_setenv … 0` lines above stop
+   > that, **preserving the vendor firmware as a dormant dual-boot backup** (HW-verified: it
+   > survives normal reboots, and you can switch back and forth — see `boot-slots.md`). Keep the
+   > lines for dual-boot; drop them if you want a plain ImmortalWrt-only board. `tools/slot-install.sh`
+   > keeps the vendor slot by default (it runs the same clear).
 
 > **Automated.** `tools/slot-install.sh` does all of 4b — detect the active/inactive slot,
 > write the inactive one, verify the staged FIT+squashfs, then flip only after you type YES.
