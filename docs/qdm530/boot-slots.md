@@ -52,7 +52,8 @@ board to switch ImmortalWrt ⇄ the vendor slot.
 ## Switch FROM the vendor firmware → the other slot  (`/proc/boot_info`)
 
 The vendor firmware *does* have `/proc/boot_info`, so use its own serializer there (never
-hand-edit the struct on the vendor side):
+hand-edit the struct on the vendor side). **You must also clear two U-Boot env flags**, or the
+bootloader will wipe the slot you are leaving — see "Keeping both slots" below:
 
 ```sh
 c=$(cat /proc/boot_info/rootfs/primaryboot); echo $((1-c)) > /proc/boot_info/rootfs/primaryboot
@@ -60,21 +61,45 @@ b0=$(sed -n 's/^mtd\([0-9]*\):.*"0:BOOTCONFIG".*/\1/p' /proc/mtd)
 b1=$(sed -n 's/^mtd\([0-9]*\):.*"0:BOOTCONFIG1".*/\1/p' /proc/mtd)
 cat /proc/boot_info/getbinary_bootconfig  > /tmp/bc0.bin; mtd write /tmp/bc0.bin /dev/mtd$b0
 cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin; mtd write /tmp/bc1.bin /dev/mtd$b1
+fw_setenv sys_upgrade 0      # <-- REQUIRED to keep ImmortalWrt in the other slot
+fw_setenv sys_recovery 0     # <-- (see below)
 reboot
 ```
 
 (The vendor `/proc/mtd` labels these partitions UPPERCASE `0:BOOTCONFIG`; ImmortalWrt renders
 them lowercase `0:bootconfig`. `bootslot` matches either case.)
 
+## Keeping both slots: the bootloader auto-syncs them
+
+The vendor U-Boot keeps the two rootfs slots **in sync** via `ql_partition_init`, driven by two
+env flags in `0:appsblenv` (decoded from the `0:APPSBL` dump, HW-confirmed): `sys_upgrade=1` ⇒
+mirror the active/primary slot over the backup; `sys_recovery=1` ⇒ restore the backup over the
+primary. **The vendor firmware sets `sys_upgrade=1` on every boot.** So if you switch *away*
+from vendor without clearing it, the next boot mirrors the now-active ImmortalWrt over the slot
+that held vendor and **overwrites it** — this is why a naive round-trip ends with both slots
+ImmortalWrt.
+
+- **ImmortalWrt → vendor** (`bootslot switch`): no clear needed. ImmortalWrt never sets the
+  flags, so the ImmortalWrt slot survives as a backup; the vendor slot simply boots.
+- **vendor → ImmortalWrt**: you **must** `fw_setenv sys_upgrade 0; fw_setenv sys_recovery 0`
+  before `reboot` (as above) to preserve the vendor slot. `tools/slot-install.sh` does this
+  automatically.
+
+With the clear, the inactive slot is a true dormant backup and survives normal reboots
+(HW-verified: ImmortalWrt running + vendor in the backup slot, intact across a plain reboot).
+`sys_upgrade`/`sys_recovery` are in `0:appsblenv` (mtd10), **not** the rootfs slots.
+
 ## Summary
 
 | Booted in | Switch to the other slot with |
 |---|---|
 | ImmortalWrt | `bootslot switch` + `reboot` |
-| Vendor firmware | the `/proc/boot_info` flip above + `reboot` |
+| Vendor firmware | `/proc/boot_info` flip **+ `fw_setenv sys_upgrade 0; fw_setenv sys_recovery 0`** + `reboot` |
 
 Round-trip HW-verified (Oct 2026): ImmortalWrt → vendor (via `bootslot`) → ImmortalWrt (via
-`/proc/boot_info`), with the vendor firmware preserved intact in its slot throughout.
+`/proc/boot_info` **with the env clear**), with the other firmware preserved intact in its slot
+throughout and surviving a plain reboot. Omit the env clear on the vendor→ImmortalWrt leg and
+the vendor slot is overwritten (both slots end up ImmortalWrt).
 
 If both slots are already ImmortalWrt and you want the vendor firmware back in one of
 them (from an MTD backup of the vendor rootfs), see **[restore-vendor.md](restore-vendor.md)**

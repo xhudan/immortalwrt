@@ -125,6 +125,21 @@ cat /proc/boot_info/getbinary_bootconfig  > /tmp/bc0.bin
 cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin
 mtd write /tmp/bc0.bin "/dev/mtd$bc0_mtd" || die "mtd write BOOTCONFIG failed"
 mtd write /tmp/bc1.bin "/dev/mtd$bc1_mtd" || die "mtd write BOOTCONFIG1 failed"
+
+# Keep the slot you are leaving as a usable dormant backup. The vendor firmware sets the
+# U-Boot env flag sys_upgrade=1 on every boot; on the next boot the bootloader's
+# ql_partition_init would then MIRROR the (now active) primary over the inactive slot and
+# overwrite it. Clearing both auto-sync flags here preserves the inactive slot, giving a
+# real dual-boot. HW-verified on this board. (sys_upgrade/sys_recovery live in 0:appsblenv,
+# not the rootfs slots.)
+if command -v fw_setenv >/dev/null 2>&1; then
+	fw_setenv sys_upgrade 0 2>/dev/null
+	fw_setenv sys_recovery 0 2>/dev/null
+	log "cleared sys_upgrade/sys_recovery env (keep the other slot as a backup)"
+else
+	log "WARNING: fw_setenv not found — the inactive slot may be overwritten by the bootloader auto-sync"
+fi
+
 log "BOOTCONFIG updated. The board will boot mtd$inact next."
 log "rebooting in 3s — reconnect at 192.168.1.1 (ImmortalWrt). If it answers on NEITHER the"
 log "new nor the old IP after ~3 min, the new slot failed to boot -> UART/TFTP recovery."

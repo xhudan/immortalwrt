@@ -46,17 +46,19 @@ reading it back (below).
 > and falls back. Flip `rootfs` **only**. This BOOTCONFIG restore is for repairing a
 > *corrupted* struct (wrong names/order/flags), not for choosing which OS runs.
 >
-> **The OEM bootloader auto-syncs the two rootfs slots.** `ql_partition_init` in the vendor
-> U-Boot (decoded from the `0:APPSBL` dump) clones one slot over the other when an env flag
-> is set — `sys_recovery=1` ⇒ restore backup→primary (`ubi … rootfs_1 → rootfs`),
-> `sys_upgrade=1` ⇒ mirror primary→backup — and a CRC check sets that flag **automatically**
-> at boot when the two rootfs slots differ. Consequence: a **persistent ImmortalWrt-primary
-> + vendor-backup dual-boot is not stable** — a dormant vendor backup gets restored over the
-> primary (and boots vendor) or wiped on the next boot. HW-confirmed: vendor freshly written
-> to the backup slot + a plain reboot → the board booted vendor. In practice: stable
-> ImmortalWrt = **both** rootfs slots ImmortalWrt; to run vendor, write vendor into a slot
-> and reboot (the bootloader boots/keeps it); to go back, re-flash that slot with ImmortalWrt.
-> Disabling this would require patching `0:APPSBL` (`check_rootfs`), i.e. UART + brick risk.
+> **The OEM bootloader auto-syncs the two rootfs slots — but you can disable it per switch.**
+> `ql_partition_init` in the vendor U-Boot (decoded from the `0:APPSBL` dump) mirrors/clones one
+> rootfs slot over the other when a U-Boot env flag in `0:appsblenv` is set: `sys_upgrade=1` ⇒
+> mirror primary→backup; `sys_recovery=1` ⇒ restore backup→primary. **The vendor firmware sets
+> `sys_upgrade=1` on every boot** (HW-confirmed), so switching *away* from vendor without
+> clearing it makes the next boot overwrite the slot you left with the now-active ImmortalWrt —
+> that is why a naive round-trip ends with both slots ImmortalWrt. The fix is simple and needs
+> **no bootloader patch**: on the vendor→ImmortalWrt leg, `fw_setenv sys_upgrade 0; fw_setenv
+> sys_recovery 0` before `reboot`. HW-verified: with the clear, ImmortalWrt boots and the vendor
+> slot survives as a dormant backup across plain reboots — a real dual-boot. See
+> `boot-slots.md` ("Keeping both slots"); `tools/slot-install.sh` does the clear automatically.
+> These flags live in `0:appsblenv` (mtd10), **not** the rootfs slots, so rebuilding mtd15/mtd16
+> is irrelevant to them.
 
 ## You need a known-good source
 
