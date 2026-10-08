@@ -46,7 +46,9 @@ write-ups for boards like the GL-B3000 and the Cudy P5.
   (uncharacterized) RJ12-pinout caveat — is in **`uart-console.md`**.
 - **A/B dual-boot.** ImmortalWrt installs to the inactive rootfs slot, leaving the vendor
   firmware intact in the other slot. Switch between them without UART: `bootslot switch`
-  from ImmortalWrt, or the `/proc/boot_info` flip from the vendor side. See **`boot-slots.md`**.
+  from ImmortalWrt, or the `/proc/boot_info` flip from the vendor side — the vendor→ImmortalWrt
+  direction **must also `fw_setenv sys_upgrade 0; sys_recovery 0`**, or the OEM bootloader
+  mirrors the active slot over the other and wipes it. See **`boot-slots.md`**.
   To put the vendor firmware back into one slot (from an MTD backup), see
   **`restore-vendor.md`** (`tools/restore-vendor.sh`).
 - **U-Boot** stops at a password prompt (`passwd_abort`). The password is `quectel`

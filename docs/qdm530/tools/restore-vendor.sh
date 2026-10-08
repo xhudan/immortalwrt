@@ -108,6 +108,7 @@ bootslot switch || die "bootslot switch failed — not rebooting; investigate."
 log "BOOTCONFIG flipped to the vendor slot. Rebooting in 3s."
 log "If it answers on neither vendor nor ImmortalWrt after ~3 min, the vendor slot failed to boot"
 log "-> UART/TFTP recovery. To go back to ImmortalWrt from the vendor side, use its /proc/boot_info"
-log "flip or the slot-install flow (see boot-slots.md / build-and-flash.md)."
+log "flip AND clear the auto-sync flags (fw_setenv sys_upgrade 0; fw_setenv sys_recovery 0) or the"
+log "slot-install flow, else the vendor slot gets wiped — see boot-slots.md / build-and-flash.md."
 sleep 3
 reboot

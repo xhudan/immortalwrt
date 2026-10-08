@@ -89,8 +89,23 @@ reboot
 
 ## Going back to ImmortalWrt later
 
-The vendor firmware has `/proc/boot_info`, so from the vendor side you install
-ImmortalWrt into the inactive slot and flip using the vendor serializer — exactly the
-non-UART flow in [build-and-flash.md](build-and-flash.md) §4b (or `slot-install.sh`).
-The ImmortalWrt slot you kept also remains, so `bootslot switch` from vendor can simply
-return to it as long as it is still there.
+From the vendor side you flip with the vendor serializer (`/proc/boot_info`) **and must clear
+the two auto-sync flags** so the vendor slot is kept as a backup — the vendor firmware sets
+`sys_upgrade=1` on every boot, and without the clear the next boot mirrors the now-active
+ImmortalWrt over the vendor slot and wipes it:
+
+```sh
+c=$(cat /proc/boot_info/rootfs/primaryboot); echo $((1-c)) > /proc/boot_info/rootfs/primaryboot
+b0=$(sed -n 's/^mtd\([0-9]*\):.*"0:BOOTCONFIG".*/\1/p' /proc/mtd)
+b1=$(sed -n 's/^mtd\([0-9]*\):.*"0:BOOTCONFIG1".*/\1/p' /proc/mtd)
+cat /proc/boot_info/getbinary_bootconfig  > /tmp/bc0.bin; mtd write /tmp/bc0.bin /dev/mtd$b0
+cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin; mtd write /tmp/bc1.bin /dev/mtd$b1
+fw_setenv sys_upgrade 0; fw_setenv sys_recovery 0        # REQUIRED to keep the vendor slot
+reboot
+```
+
+If the ImmortalWrt slot you kept is still intact this just boots it; otherwise install
+ImmortalWrt into the inactive slot first (the non-UART flow in
+[build-and-flash.md](build-and-flash.md) §4b, or `slot-install.sh` — both clear the flags for
+you). See [boot-slots.md](boot-slots.md) → "Keeping both slots". (`bootslot` is an ImmortalWrt
+command and does **not** exist on the vendor side.)
