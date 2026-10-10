@@ -40,9 +40,34 @@ stale handle: `adb kill-server && adb devices`.
 
 ## Sending AT to the modem
 
-On **our** port the modem has **no board-side AT tty** — its QMI runs on the QRTR bus
-(`mhi0_IPCR`, driven by wwand), there is no `/dev/ttyUSB*` or `/dev/wwan0at0`. So AT
-commands go through **adb, from inside the modem**, over `/dev/smd11`:
+### From the board — `/dev/wwan0at0` (preferred)
+
+The board **does** have an AT tty, exposed over MHI. The modem offers an AT port on the
+**DUN channel (MHI 32/33)** — on the modem a `port_bridge smd7 mhi_pipe_32` waits for the
+host to open it — but the generic `modem_qcom_v1` MHI channel table did not declare 32/33,
+so the host never opened it. Patch `0960-bus-mhi-pci_generic-sdx-add-dun-at-channel.patch`
+adds `DUN` 32/33; `mhi_wwan_ctrl` then maps it to `WWAN_PORT_AT` and creates
+`/dev/wwan0at0` (`dmesg`: `wwan wwan0: port wwan0at0 attached`). HW-verified on the
+RG520N-EB — needs `kmod-mhi-wwan-ctrl` + `kmod-mhi-pci-generic` (both in the image).
+
+```sh
+stty -F /dev/wwan0at0 raw -echo 2>/dev/null
+exec 3<>/dev/wwan0at0
+printf 'ATE0\r' >&3
+printf 'ATI\r'  >&3
+timeout 3 cat <&3 | tr -d '\r'   # -> Quectel / RG520N-EB / Revision: ... / OK
+exec 3>&-
+```
+
+Caveats: BusyBox `sleep` rejects fractional seconds (use whole seconds or none); a
+separate `cat &` + `printf` racing on two opens can miss the reply — the single `exec
+3<>` fd above is reliable. wwand also scans `/dev/wwan*at*`, so it may start using the AT
+port for some operations; it did **not** hold the port open in testing (`fuser` empty).
+
+### From inside the modem — `/dev/smd11` (fallback, works in every mode)
+
+Independent of the board, the vendor's Qlib, and MHI — use it for bring-up or when the
+board-side port is unavailable:
 
 ```sh
 adb shell
@@ -53,8 +78,7 @@ kill %1 ; tr -d '\r' < /tmp/o.txt
 
 `/dev/smd11` is not a tty, so `microcom`/`stty` fail ("Inappropriate ioctl") — that is
 normal, use raw read/write as above. Its output interleaves with the modem's own polling
-(`AT+QCAINFO`, `AT+QENG`); ignore the extra lines. This path does not depend on the
-board, the vendor's Qlib, or MHI, so it works in every mode.
+(`AT+QCAINFO`, `AT+QENG`); ignore the extra lines.
 
 (Signal numbers do **not** need AT — read them on the board with
 `ubus call wwand modem_signal '{"modem":"wwmodem"}'`.)

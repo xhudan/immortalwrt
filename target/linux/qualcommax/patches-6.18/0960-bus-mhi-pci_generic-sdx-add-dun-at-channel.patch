@@ -1,0 +1,34 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] bus: mhi: pci_generic: expose the SDX DUN (AT) channel
+
+The generic modem_qcom_v1 config (bound by the Quectel RG520N-EB, which
+enumerates as the plain Qualcomm 17cb:0308 and so falls through to
+mhi_qcom_sdx65_info) declares DIAG/MBIM/QMI/IPCR/IP_SW0/IP_HW0/FIREHOSE but no
+DUN channel, so the host never opens MHI channel 32/33 and no AT port appears on
+the router. All other modem profiles in this file (Quectel em1xx/rm5xx, Telit,
+Sierra, Foxconn) carry DUN at 32/33, and the modem firmware DOES provide it:
+verified on the RG520N-EB (sdxlemur) over adb, which runs
+`port_bridge smd7 mhi_pipe_32` - the modem bridges its AT port (smd7) to MHI
+channel 32 and merely waits for the host to open it (the device-side
+/dev/mhi_pipe_32 is created on demand; only the channels modem_qcom_v1 opens -
+2/4/10/12/14/16 - exist until then).
+
+Declare DUN 32/33 on the control event ring (ring 0, as MBIM/QMI/IPCR already
+do - a low-traffic control channel needs no ring of its own). mhi_wwan_ctrl maps
+"DUN" -> WWAN_PORT_AT, so the host then exposes /dev/wwan0at0 and AT works from
+the router. 32-element rings match every other DUN in this file. A modem that
+happens not to implement the channel simply leaves it disabled - harmless.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/drivers/bus/mhi/host/pci_generic.c
++++ b/drivers/bus/mhi/host/pci_generic.c
+@@ -314,6 +314,8 @@ static const struct mhi_channel_config modem_qcom_v1_mhi_channels[] = {
+ 	MHI_CHANNEL_CONFIG_DL(15, "QMI", 4, 0),
+ 	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 8, 0),
+ 	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 8, 0),
++	MHI_CHANNEL_CONFIG_UL(32, "DUN", 32, 0),
++	MHI_CHANNEL_CONFIG_DL(33, "DUN", 32, 0),
+ 	MHI_CHANNEL_CONFIG_UL_FP(34, "FIREHOSE", 32, 0),
+ 	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 0),
+ 	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
