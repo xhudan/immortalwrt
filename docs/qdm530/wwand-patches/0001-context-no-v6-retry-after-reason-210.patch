@@ -1,0 +1,75 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH 1/2] context: stop re-attempting IPv6 once it is clearly unavailable
+
+With pdp_type=ipv4v6, wwand re-requests the IPv6 family on every (re)connect.
+On some modem+carrier combos the modem's own data stack CRASHES on the teardown
+of a refused IPv6 WDS client - HW-observed on a Quectel RG520N-EB with Smartfren
+(MCC/MNC 510/09): right after "ipv6 activation failed, continuing (PDN IPv6 call
+disallowed, reason 210)" and CONNECTED on v4, the modem's qrtr node goes gone /
+"device disappeared" and resets (~40s). The crash makes wwand rebuild the
+context, and ipv4v6 then re-requests v6 - an endless crash loop, WAN never up.
+
+Track an "IPv6 unavailable" state and drop v6 from wanted_families. Because the
+crash REBUILDS the context, the state cannot live in `self`; it lives on the
+daemon's per-interface entry (opts.v6state, carried via prev - see patch 2/2) so
+it outlives the rebuild. Pin immediately on the explicit "PDN IPv6 call
+disallowed" (reason 210), or after a couple of consecutive v6 failures of ANY
+reason (carriers report different codes). A v6 that actually comes up resets the
+strike count, so a dual-stack carrier (e.g. XL 510/11) keeps IPv6 and never pins
+even across a one-off transient; a SIM swap, reboot or ifdown/ifup re-probes v6.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/src-ucode/context.uc
++++ b/src-ucode/context.uc
+@@ -90,6 +90,10 @@
+
+
+ 	let deps = opts.deps ?? {};
++	// IPv6-unavailable state lives on the daemon's per-interface entry
++	// (opts.v6state, carried via prev), NOT in `self`, so it SURVIVES the
++	// context rebuild a modem crash triggers. { refused?: bool, fails?: int }
++	let v6state = opts.v6state ?? {};
+ 	let log = deps.log ?? ((level, msg) => warn(sprintf('%s: interface %s: %s\n', level, self.name, msg)));
+
+ 	// log an assigned family IP config at 'notice' only the FIRST time (at
+@@ -155,7 +159,7 @@
+ 		if (pdp == 'ipv4' || pdp == 'ipv4v6')
+ 			push(fams, 4);
+
+-		if (pdp == 'ipv6' || pdp == 'ipv4v6')
++		if ((pdp == 'ipv6' || pdp == 'ipv4v6') && !v6state.refused)
+ 			push(fams, 6);
+
+ 		return fams;
+@@ -900,6 +904,20 @@
+ 						if (family == 4 || !got_any && idx >= length(fams))
+ 							return self._fail(err);
+
++						// Stop re-attempting IPv6 once it is clearly unavailable here. Some
++						// modem+carrier combos crash the modem's own data stack on EVERY
++						// refused-v6 teardown (qrtr node gone / device disappeared, HW-seen
++						// on Quectel RG520N-EB + Smartfren 510/09); the crash rebuilds this
++						// context, so ipv4v6 re-requesting v6 is an endless crash loop. Pin
++						// on the explicit "PDN IPv6 call disallowed" (reason 210) at once, or
++						// after a couple of failures of ANY reason (carriers differ). The
++						// state lives on the daemon entry (v6state), so it outlives the
++						// rebuild; a dual-stack carrier's v6 succeeds and resets it below, so
++						// it never pins; a SIM swap / reboot / ifdown-ifup re-probes v6.
++						if (family == 6 && (err?.verbose?.reason == 210 ||
++						    (v6state.fails = (v6state.fails ?? 0) + 1) >= 2))
++							v6state.refused = true;
++
+ 						let cdesc = callend.describe(err?.call_end_reason, err?.verbose, err?.ext_error);
+ 						log('warn', sprintf('ipv%d activation failed, continuing: %s%J', family,
+ 							cdesc?.text ? sprintf('%s (%s%s) ', cdesc.text,
+@@ -936,6 +954,9 @@
+ 							return next();
+ 						}
+
++						if (family == 6)
++							v6state.fails = 0;   // a v6 that came up clears the strikes
++
+ 						next();
+ 					});
+ 				});

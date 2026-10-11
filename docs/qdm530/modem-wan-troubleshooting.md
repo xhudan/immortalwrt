@@ -50,6 +50,15 @@ uci commit network
 ifup wan        # or reboot
 ```
 
+> **Better fix — keep IPv6 where it is available.** On carriers that *crash the modem*
+> on the refused-v6 teardown (Smartfren → `device disappeared` **reset loop**, not just a
+> flap), the loop is fixed in **wwand** so `ipv4v6` can stay the default: see
+> **[ipv6-dualstack-crash-fix.md](ipv6-dualstack-crash-fix.md)** (two patches under
+> `wwand-patches/`, pending an upstream PR). With them, `ipv4v6` crashes once on a
+> refusing carrier then settles on stable IPv4, while a dual-stack carrier (XL) still
+> gets IPv6. The `pdp_type='ipv4'` change above is the workaround when those patches
+> are not built in.
+
 **Which default to ship** (`pdp_type` is on the `wan` interface, set by
 `uci-defaults/26_wwand-modem`, currently `ipv4v6`):
 - `ipv4v6` (dual-stack): IPv6 where the carrier supports it (XL), but IPv6-refusing

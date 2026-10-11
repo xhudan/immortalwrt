@@ -1,0 +1,35 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH 2/2] daemon: persist v6state across the context rebuild
+
+Patch 1/2 keeps the "IPv6 unavailable" decision on a per-interface object
+(v6state) rather than in the context's `self`, because a modem that crashes on
+a refused-v6 teardown makes the daemon rebuild the context - which would reset
+any state held in `self` and re-arm the crash loop.
+
+Carry v6state across the rebuild the same way `_failed_at` and
+`reconnect_on_register` are carried (from the previous entry via `prev`), and
+hand the live object to the context factory so the context reads and updates it
+in place. A fresh interface starts with an empty {} (v6 attempted normally).
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/src-ucode/daemon.uc
++++ b/src-ucode/daemon.uc
+@@ -3159,6 +3159,9 @@
+ 		             // entry can fail to exist across a reload, and then there
+ 		             // is nothing to carry it from.)
+ 		             _failed_at: prev?._failed_at,
++		             // IPv6-unavailable state (context.uc v6state) — carried so
++		             // it survives the modem-crash-driven context rebuild.
++		             v6state: prev?.v6state ?? {},
+ 		             // ...or, after a daemon restart, from the file
+ 		             reconnect_on_register: prev?.reconnect_on_register ?? restored };
+
+@@ -3177,6 +3180,7 @@
+ 			name: name,
+ 			modem: mentry.modem,
+ 			config: cfg,
++			v6state: entry.v6state,
+ 			timing: opts?.ctx_timing,
+ 			deps: {
+ 				log: (level, msg) => log(level, sprintf('interface %s: %s', name, msg)),
