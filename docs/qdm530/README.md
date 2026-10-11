@@ -86,7 +86,7 @@ mtd4  0:QSEE        mtd9  0:CDT_1       mtd14 0:TRAINING
 | Ethernet lan1 (1 G) | ✅ | IPQ5018 internal GE PHY |
 | Ethernet lan2 (2.5 G) | ✅ | RTL8221B; native 2.5G peer + 1G rate-matching + hot-plug |
 | Wi-Fi 2.4 GHz | ✅ | `ath11k`, broadcasting |
-| Wi-Fi 5 GHz | ✅ | QCN9074, UNII-3 only (ch149 / HE20), pinned via an ieee80211 hotplug; the generic board.bin (board_id 0xff, no caldata) gives a self-managed regdomain that disables ch36–144 |
+| Wi-Fi 5 GHz | ✅ | QCN9074, full band at **160 MHz** (ch36 / HE160, 23 dBm — matches vendor), pinned via an ieee80211 hotplug. `board_id` reads 0xff (no caldata), but the width is governed by the regulatory **country**, not caldata: `country=CN` unlocks the full band; `ID`/world collapsed it to 20 MHz. Non-DFS alt: ch149 / HE80 (33 dBm). See `wifi-5ghz-regulatory.md` |
 | Modem WAN — PCIe1/MHI | ✅ | RG520N-EB `17cb:0308`; link trains, WAN auto-seeded + dialed by wwand over QMI-over-QRTR (rmnet/QMAP), IPv4 + IPv6 dual-stack (endpoint/QMAP auto-derived). Sustained-DL stable: the IP_HW0 ring is 512 and `mhi_net` refills it in-line (patches 0958/0959) so the modem's DL engine never starves — see `downlink-stall.md` |
 | Modem — USB | ❌ | USB host disabled: combo PCIe/USB3 PHY is given to pcie1, and dwc3 won't run without the SS PHY — so no USB AT/DIAG ports |
 | Front-panel LEDs | ✅ | 4 RGB LEDs on the AW9523B via `leds-aw9523` (`/sys/class/leds`): power, wan (netdev), mobile/signal + status (daemon). See `leds.md` |
@@ -128,11 +128,6 @@ interface is kept only as a control/diagnostic side channel.
 
 ## Open issues
 
-- **5 GHz is UNII-3 only** (channels 149–161, 20 MHz). The QCN9074 board.bin has no
-  genuine per-board caldata (`board_id` reads 0xff; the board's `0:ART` is all 0xff),
-  so ath11k's self-managed regdomain disables ch36–144; the radio is pinned to
-  ch149/HE20 by `hotplug.d/ieee80211/13-qdm530-5ghz-channel`. Full-band 5 GHz would
-  need real vendor caldata, which the board does not carry.
 - **No SoC thermal sensor (tsens).** A hardware limitation, not a regression: the
   board's calibration fuses are unprogrammed, so the vendor firmware's tsens already
   logged `tsens calibration failed` — thermal sensing never worked on this unit. On

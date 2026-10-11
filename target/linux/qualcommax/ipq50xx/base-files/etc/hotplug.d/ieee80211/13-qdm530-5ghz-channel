@@ -1,12 +1,17 @@
 #!/bin/sh
-# QDM530: pin the 5 GHz radio (QCN9074 on PCIe) to channel 149 / HE20 and bring the
+# QDM530: pin the 5 GHz radio (QCN9074 on PCIe) to channel 36 / HE160 and bring the
 # wireless stack up cleanly once that radio appears.
 #
 # The QCN9074 enumerates ~20 s into boot over PCIe - after the uci-defaults run - so
 # its channel cannot be fixed there (it is not in /etc/config/wireless yet). Its
 # board.bin carries no real per-board caldata (board_id reads 0xff), so ath11k's
-# self-managed regulatory domain exposes only the UNII-3 sub-band (ch 149-161) at
-# 20 MHz. The OpenWrt default (ch36 / HE80) is rejected ("Not supported (-95)").
+# self-managed regulatory domain is driven entirely by the country code: with
+# country=CN (set here and in 25_set-wireless-country) it exposes the full 5 GHz band
+# at up to 160 MHz (HW-verified); ID / the "00" world default would collapse it to
+# 20 MHz. ch36 / HE160 (5250 center, 23 dBm) matches the vendor firmware; it spans the
+# DFS sub-band (5250-5330), so bring-up runs a one-time ~60 s CAC before the AP beacons
+# (CAC-COMPLETED success, radar_detected=0, HW-verified). An alternative that avoids DFS
+# is ch149 / HE80 (UNII-3, 5775 center, 33 dBm, non-DFS) - also CN, no CAC wait.
 #
 # Both self-managed radios also -95 their FIRST setup attempt, before the country
 # code settles, and the boot-time bring-up can lose that race and leave a radio
@@ -30,11 +35,12 @@ fixup_5g() {
 	config_get band "$radio" band
 	[ "$band" = "5g" ] || return 0
 	have_5g=1
-	[ "$(uci -q get "wireless.$radio.channel")" = "149" ] &&
-	[ "$(uci -q get "wireless.$radio.htmode")" = "HE20" ] && return 0
-	uci -q set "wireless.$radio.channel=149"
-	uci -q set "wireless.$radio.htmode=HE20"
-	uci -q set "wireless.$radio.country=ID"
+	[ "$(uci -q get "wireless.$radio.channel")" = "36" ] &&
+	[ "$(uci -q get "wireless.$radio.htmode")" = "HE160" ] &&
+	[ "$(uci -q get "wireless.$radio.country")" = "CN" ] && return 0
+	uci -q set "wireless.$radio.channel=36"
+	uci -q set "wireless.$radio.htmode=HE160"
+	uci -q set "wireless.$radio.country=CN"
 	changed=1
 }
 
