@@ -1,0 +1,81 @@
+#!/bin/sh
+# qdm530 cellular WAN connection monitor (active L3 probe -> modem_reset).
+#
+# wwand does not probe L3 itself (an in-daemon ping would guess source/route/
+# zone and false-alarm under mwan3/VRF — ddimension/wwand#13). L3 is measured
+# here, outside the daemon. This recovers the "connected but no internet" stall
+# where the bearer is silently dead (rx frozen) while wwand still reports the
+# context CONNECTED — wwand's own zero-rx backstop defaults to 6 h and its
+# usb_repower action is a no-op on this PCIe/MHI modem.
+#
+# IMPORTANT — recovery is modem_reset, NOT ubus context_failed. context_failed
+# tears the session down with a QMI STOP_NETWORK (context.uc down -> stop_network),
+# and this RG520N-EB CRASHES its own data stack on STOP_NETWORK ("device
+# disappeared" -> ABSENT, HW-seen 2026-10-17; same firmware fragility as the
+# refused-IPv6 teardown crash). modem_reset (DMS offline->reset) reboots the modem
+# cleanly without a STOP_NETWORK and recovers in ~40 s. So we never redial; we
+# reset — and conservatively, because resetting a fragile modem is not free.
+
+MODEM="${MODEM:-wwmodem}"
+HOSTS="${HOSTS:-8.8.8.8 1.1.1.1}"   # ICMP targets; a cycle "fails" only if NONE answer
+INTERVAL="${INTERVAL:-30}"          # s between probes
+FAIL_LIMIT="${FAIL_LIMIT:-6}"       # consecutive all-fail cycles before a reset (~3 min of
+                                    # SUSTAINED 100% loss — rides out boot-settle, transient
+                                    # fades, and weak-signal partial loss, which is never 100%)
+PING_COUNT="${PING_COUNT:-2}"
+PING_TIMEOUT="${PING_TIMEOUT:-2}"   # s per ping
+MIN_RESET_GAP="${MIN_RESET_GAP:-600}"  # s: never reset this fragile modem more than once per
+                                       # this window, no matter how long the stall persists
+SETTLE="${SETTLE:-90}"              # s to let a reset re-register + re-establish before probing
+
+fails=0
+last_reset=0
+log() { logger -t wan-watchdog "$@"; }
+
+probe() {
+	for h in $HOSTS; do
+		ping -c "$PING_COUNT" -W "$PING_TIMEOUT" "$h" >/dev/null 2>&1 && return 0
+	done
+	return 1
+}
+
+# true only while wwand's bearer state is CONNECTED — the stale-but-dead case.
+# On any other state (dialing/registering/absent/admin-down) wwand is already
+# driving its own recovery; we stay out so we never fight it or reset mid-dial.
+connected() {
+	ubus call wwand status 2>/dev/null | grep -q '"state": "CONNECTED"'
+}
+
+log "started (modem_reset mode; hosts='$HOSTS' interval=${INTERVAL}s fail_limit=$FAIL_LIMIT min_reset_gap=${MIN_RESET_GAP}s)"
+
+while :; do
+	sleep "$INTERVAL"
+
+	if probe; then
+		[ "$fails" -ge "$FAIL_LIMIT" ] && log "L3 recovered"
+		fails=0
+		continue
+	fi
+
+	if ! connected; then
+		fails=0
+		continue
+	fi
+
+	fails=$((fails + 1))
+	[ "$fails" -lt "$FAIL_LIMIT" ] && continue
+
+	now="$(date +%s)"
+	if [ $((now - last_reset)) -lt "$MIN_RESET_GAP" ]; then
+		# sustained stall but we reset recently — hold off (fragile modem); keep
+		# counting so the log shows it, but do not stack resets.
+		[ $((fails % 10)) -eq 0 ] && log "still no L3 (CONNECTED) but within ${MIN_RESET_GAP}s of last reset — holding"
+		continue
+	fi
+
+	log "cellular data stalled ~$((FAIL_LIMIT * INTERVAL))s (CONNECTED, no path) — modem_reset $MODEM"
+	ubus call wwand modem_reset "{\"modem\":\"$MODEM\"}" >/dev/null 2>&1
+	last_reset="$now"
+	fails=0
+	sleep "$SETTLE"
+done
