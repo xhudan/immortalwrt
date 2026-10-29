@@ -40,6 +40,16 @@
 # Not faster than that on purpose - a reboot costs ~2-3 min of its own here
 # (boot, clients reassociating, ~60 s DFS CAC on ch36/HE160), so rebooting
 # sooner would trade a possible self-recovery for certain downtime.
+#
+# zero_rx_timeout 120 (upstream default 21600 = 6 h) is the DETECTION latency in
+# front of that ladder: wwand's rx_stall_watch trips when the cumulative rx
+# counter has stood still this long. It reads only rx -- TX is never consulted --
+# so on a CGNAT'd cellular link with an idle LAN it cannot tell a dead bearer
+# from a quiet one, and 6 h is upstream being honest about that. 120 s is safe
+# here ONLY because /usr/sbin/qdm530-wan-keepalive keeps one echo per 30 s
+# flowing on the WAN, which makes "no rx" mean dead rather than idle.
+# THE ORDER MATTERS: never shorten this without that probe running, or a quiet
+# night trips the watchdog on a healthy link and climbs the ladder to a reboot.
 . /lib/functions.sh
 
 [ "$(board_name)" = "unbranded,qdm530" ] || exit 0
@@ -54,6 +64,7 @@ if ! uci -q get network.wwmodem >/dev/null; then
 		set network.wwmodem.netdev='mhi_hwip0'
 		set network.wwmodem.recovery_steps='4 10 14'
 		set network.wwmodem.failreboot='15'
+		set network.wwmodem.zero_rx_timeout='120'
 	EOF
 fi
 

@@ -1,0 +1,14 @@
+#!/bin/sh
+#
+# QDM530: enable the cellular WAN keepalive. It only generates traffic on the
+# WAN so wwand's zero-rx watchdog can tell a dead bearer from an idle link;
+# recovery stays entirely with wwand. (The ipq50xx base-files are shared across
+# devices, so guard by board; the service also self-guards on start.)
+#
+. /lib/functions.sh
+
+[ "$(board_name)" = "unbranded,qdm530" ] || exit 0
+
+/etc/init.d/qdm530-wan-keepalive enable
+
+exit 0

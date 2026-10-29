@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# QDM530: keep inbound traffic flowing on the cellular WAN so that wwand's
+# zero-rx watchdog measures LIVENESS rather than idleness.
+#
+# wwand's rx_stall_watch (context_common.uc) samples only the cumulative rx
+# counter: any change clears the stall, no change for `zero_rx_timeout` trips
+# it. TX is never consulted. On a CGNAT'd cellular link with an idle LAN
+# nothing arrives unsolicited, so a quiet night is indistinguishable from a
+# dead bearer -- which is why upstream's default is a very conservative 6 h.
+# One small periodic probe removes that ambiguity and lets `zero_rx_timeout`
+# be short (120 s, seeded in uci-defaults/26_wwand-modem).
+#
+# THIS SCRIPT TAKES NO RECOVERY ACTION, deliberately. It only generates
+# traffic. Deciding that a stall happened and acting on it is wwand's job
+# (zero-rx -> modem reset -> recovery ladder -> board reboot). The earlier
+# qdm530-wan-watchdog was removed because it made those decisions itself and
+# its heuristics had to be tuned per modem; do not re-add them here.
+#
+# Bound to the WAN device with `ping -I`: without that the source address and
+# the route are guessed, which is the objection wwand's author raises against
+# an in-daemon probe (ddimension/wwand#13).
+#
+# Two targets so one unreachable resolver is not a false stall; the first
+# success ends the round, so the steady-state cost is one echo per interval
+# (~184 B per exchange, ~16 MB/month).
+
+DEV=wwand0
+TARGETS="1.1.1.1 9.9.9.9"
+INTERVAL=30
+
+while :; do
+	for t in $TARGETS; do
+		ping -c 1 -W 3 -I "$DEV" "$t" >/dev/null 2>&1 && break
+	done
+	sleep "$INTERVAL"
+done
