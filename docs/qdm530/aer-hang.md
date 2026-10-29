@@ -109,34 +109,93 @@ one. `usb_repower` is a no-op on a PCIe/MHI modem for the same reason. The recov
 ladder consequently has nothing between *"reset the modem over QMI"* (which needs a
 modem that still answers) and *"reboot the board"*.
 
-### The one path still untested: a deliberate PERST toggle
+### PERST#: unreachable from userspace, reachable from the kernel
 
-PERST# (GPIO 18) is the only modem line that exists, and on SDX6x it is normally wired
-to the modem's reset input — so unlike an MHI register reset (which needs the modem's
-firmware to cooperate), asserting it may reset the modem SoC outright. **It has not been
-tested**, because neither action tried on 2026-10-29 actually drives it:
+PERST# (GPIO 18) is the only modem control line this board has, and on SDX6x it is
+normally wired to the modem's reset input -- so unlike an MHI register reset (which
+needs the modem's firmware to cooperate), asserting it may reset the modem SoC
+outright.
 
-- unbinding `mhi-pci-generic` rebinds the **endpoint** driver; the host controller keeps
-  the link up and never touches PERST
-- `remove` + `rescan` re-enumerates from config space; the link is not brought down at
-  the host either
-- there is no FLR knob (`/sys/bus/pci/devices/0001:01:00.0/reset` does not exist), and
-  the root port has no secondary-bus-reset method (`reset_subordinate` → `-ENOTTY`)
+**No userspace path to it exists** (all verified on 6.18.54):
 
-What *would* drive PERST is unbinding the **host controller**, which tears the link down
-and re-asserts PERST on the way back up. The modem's controller is `80000000.pcie`
-(domain `0001`; `a0000000.pcie` is the QCN9074 in domain `0000`):
+- the GPIO is claimed by the host controller driver
+  (`pcie-qcom.c`: `devm_gpiod_get_optional(dev, "perst", ...)`), so it never appears
+  in the gpio sysfs
+- `qcom-pcie` sets `suppress_bind_attrs`, so `/sys/bus/platform/drivers/qcom-pcie/`
+  has no `bind`/`unbind` -- only the device symlinks and `uevent`
+- runtime PM is pinned active: probe calls `pm_runtime_get_sync()` with no matching
+  put on the success path, and there are no runtime-PM ops, so `power/control`
+  cannot produce a suspend either
+- there is no FLR knob (`/sys/bus/pci/devices/0001:01:00.0/reset` does not exist) and
+  the root port has no secondary-bus-reset method (`reset_subordinate` -> `-ENOTTY`)
 
-```sh
-echo 80000000.pcie > /sys/bus/platform/drivers/qcom-pcie/unbind
-echo 80000000.pcie > /sys/bus/platform/drivers/qcom-pcie/bind
+`qcom_perst_assert()` is therefore reachable only from the driver's own host
+init/deinit (`qcom_ep_reset_assert` / `qcom_ep_reset_deassert`).
+
+**From kernel code it IS reachable**, and that is what the local "Fix A" does:
+`suppress_bind_attrs` only hides the sysfs attributes, it does not remove the
+capability, so `device_release_driver()` + `device_attach()` on the host bridge's
+parent still run host deinit/init -- and with them PERST assert/de-assert. Fix A adds
+to `drivers/bus/mhi/host/pci_generic.c`:
+
+```c
+device_release_driver(rb->host);   /* in-kernel equivalent of unbind */
+device_attach(rb->host);           /* ...and bind */
 ```
 
-Two caveats before trying it. It only means anything **while the modem is actually
-latched in SYSERR** — on a healthy modem it proves nothing. And it removes the whole PCI
-domain, not just the endpoint, so if the rebind fails the modem is gone until a reboot
-(which is the fallback anyway). If it does clear SYSERR, it is a far cheaper rung than
-rebooting the router, and worth wiring into the recovery ladder.
+scheduled from the recovery path:
+
+```c
+err_try_reset:
+	err = pci_try_reset_function(pdev);
+	if (err) {
+		dev_err(&pdev->dev, "Recovery failed: %d\n", err);
+		mhi_pci_schedule_host_rebind(pdev);
+	}
+```
+
+**Its trigger is the limitation, not its mechanism.** It fires only after
+`mhi_pci_recovery_work()` has run and `pci_try_reset_function()` has failed. In the
+failures observed on 2026-10-28/29 that path never ran at all (`Recovery failed` and
+`Device died`: zero hits in dmesg, `rebind=0` in the field log), so PERST has still
+never actually been asserted. The mechanism is sound and untested, which is not the
+same as unavailable.
+
+> WARNING: Fix A currently exists ONLY as an edit to the extracted source under
+> `build_dir`; it is not in `target/linux/qualcommax/patches-6.18/`. It is compiled
+> into `mhi_pci_generic.ko` (`CONFIG_MHI_BUS_PCI_GENERIC=m`) and ships in the built
+> image, but one `make dirclean` loses it. Capture it as a patch.
+
+### The vendor has no recovery for this at any layer
+
+Checked 2026-10-29 against the extracted QSDK rootfs, Quectel's out-of-tree
+`pcie_mhi` (what the vendor loads instead of mainline `mhi-pci-generic`), and the
+vendor kernel itself (LZMA inside the FIT in the `kernel` UBI volume):
+
+- `mhi_qti.c mhi_power_up()`: on `MHI_STATE_SYS_ERR` it writes `MHI_STATE_RESET`,
+  polls for `timeout_ms`, and if the device is still in SYS_ERR **returns `-EIO` and
+  aborts the power-up** -- the same give-up mainline showed us.
+- `mhi_status_cb()` for `MHI_CB_SYS_ERROR`: only `pm_runtime_forbid()`. No recovery.
+- `mhi_pm_sys_err_worker()`: only `mhi_pm_disable_transition(MHI_PM_SYS_ERR_PROCESS)`
+  -- a teardown, not a recovery.
+- the endpoint's QSDK PCIe integration (`QCOM_AP_AND_EFUSE_PCIE_SLEEP`) registers for
+  `MSM_PCIE_EVENT_WAKEUP` only, and calls `msm_pcie_pm_control(SUSPEND/RESUME)`:
+  power management, never recovery. No `msm_pcie_recover*`, no link-down handler.
+- the vendor kernel does carry a debugfs menu with `enumerate: de-assert PERST,
+  enumerate PCIe` / `linkdown: bring down PCIe link` -- but it belongs to **cnss2
+  (WLAN)**, not the modem: the neighbouring strings are `cnss/dev_boot`,
+  `cnss/reg_read`, `cnss/runtime_pm`, `WLAN_EN`.
+- no userspace script in the vendor rootfs resets, re-powers or "refreshes" the modem.
+
+Structurally the vendor could not fix it anyway: in this failure the **PCIe link stays
+up** (it trains at 5 GT/s x1 while MHI is dead), so no PCIe-layer mechanism has an
+event to react to, and the MHI layer -- the only one that knows -- never signals the
+PCIe layer. Nothing connects the two. Fix A is precisely that missing connection,
+which is why it is novel rather than copied.
+
+One thing the vendor does expose that mainline does not: `mhi_debugfs_trigger_reset`
+(plus `_m0`/`_m3`). It drives the same MHI reset that gives up under SYS_ERR, so it is
+a manual handle on a known-insufficient mechanism, not a new one.
 
 ## Related
 
