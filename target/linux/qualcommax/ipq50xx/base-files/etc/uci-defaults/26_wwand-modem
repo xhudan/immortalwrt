@@ -20,6 +20,26 @@
 # IPv4-only if the carrier rejects the IPv6 PDP. APN is left to the SIM/network
 # default - set network.wwmodem.apn (or network.wan.apn) if the carrier needs one.
 #
+# Recovery ladder: wwand climbs it on repeated activation failures, firing a
+# hardware rung at the attempt counts in `recovery_steps` and finally a board
+# reboot at `failreboot` + 1. The defaults (8/16/24, failreboot 100) are tuned
+# for boards where the rungs can actually do something; two of them cannot here:
+#   - `usb_repower`, the third rung, is a GUARANTEED no-op on this board. It
+#     pulses a modem power/reset line, and there is none - the vendor DTB gives
+#     the modem's PCIe node only `perst-gpio` (GPIO 18), no power GPIO, no
+#     supply, no GPIO regulator (see docs/qdm530/aer-hang.md).
+#   - `opmode_cycle` and `modem_reset` are QMI commands, so they need a modem
+#     that still answers. A modem latched in MHI SYSERR does not, and nothing
+#     short of a board reboot clears that - HW-tested: neither a host re-bind
+#     nor a PCI remove+rescan does.
+# So for the failure that actually hurts, the reboot is the only rung that
+# works, and the default put it at attempt 101 ~= 47 min of backoff (the retry
+# backoff is min(n*2s, 30s), so attempt N costs N*(N-1) s up to N=16, then 30 s
+# each). Compress the ladder: both useful QMI rungs early and cheap, reboot at
+# attempt 16 ~= 4 min of backoff (~6-8 min with the time each attempt takes).
+# Not faster than that on purpose - a reboot costs ~2-3 min of its own here
+# (boot, clients reassociating, ~60 s DFS CAC on ch36/HE160), so rebooting
+# sooner would trade a possible self-recovery for certain downtime.
 . /lib/functions.sh
 
 [ "$(board_name)" = "unbranded,qdm530" ] || exit 0
@@ -32,6 +52,8 @@ if ! uci -q get network.wwmodem >/dev/null; then
 		set network.wwmodem.device='qrtr'
 		set network.wwmodem.protocol='qmi'
 		set network.wwmodem.netdev='mhi_hwip0'
+		set network.wwmodem.recovery_steps='4 10 14'
+		set network.wwmodem.failreboot='15'
 	EOF
 fi
 
