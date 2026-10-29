@@ -198,7 +198,9 @@ front-panel LED mapping and driver, `modem-modes.md` for reaching/tuning the mod
 band lock, EP vs default mode), `bootloop-postmortem.md` for the watchdog debugging story,
 `pcie1-modem-combo-phy.md` for the modem-over-PCIe bring-up (the PERST-polarity fix that
 made it train, the combo-PHY/USB3 mux caveat, and the QMI-over-QRTR WAN path),
-`downlink-stall.md` for the sustained-DL stall fix (MHI ring starvation → patches 0958/0959), and
+`downlink-stall.md` for the sustained-DL stall fix (MHI ring starvation → patches 0958/0959),
+`aer-hang.md` for the silent resets that track poor RF (the PCIe AER handler hanging on the
+modem's dead link → `pci=noaer pcie_ports=compat`, and the ramoops console that proved it), and
 `tools/` for helper scripts (`uart-console.sh` to open the serial console / catch U-Boot on
 a bootloop; `tftp-recovery-setup.sh` for the UART/TFTP recovery host; `slot-install.sh` +
 `slot-install-push.sh` for the automated non-UART A/B slot install; `restore-vendor.sh` to

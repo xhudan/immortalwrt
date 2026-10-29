@@ -64,8 +64,52 @@
 		 * off the critical path. (U-Boot builds the cmdline itself and ignores
 		 * its bootargs env, so this has to live in the FDT bootargs-append.)
 		 */
-		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
+		/*
+		 * pci=noaer: the 5G modem on pcie1 crashes its link whenever it SSRs
+		 * (poor RF, or a D3hot power transition). The root port then raises a
+		 * PCIe AER interrupt, and the kernel AER service (aer_isr ->
+		 * pci_walk_bus -> find_device_iter) reads the config space of every
+		 * device to find the source - including the modem, whose link is now
+		 * down. That config read is an MMIO to a dead link with no completion
+		 * (CmpltTO); it HANGS the CPU in the handler, the external tlmm26
+		 * watchdog is not fed for >1.5 s, and the board resets silently. Proven
+		 * by pstore-ftrace (aer_isr -> ... -> dw_pcie_rd_other_conf hanging).
+		 * pci=noaer disables AER; PME (another port service that walks config
+		 * on an error) can hang the same way, so pcie_ports=compat runs ALL port
+		 * services in compat mode - no handler touches the downed link. A runtime
+		 * SBR is not an option either (the root port's reset_subordinate returns
+		 * -ENOTTY - no bus-reset method), so recovery after a modem SSR is left to
+		 * wwand's recovery ladder (modem reset, then a board reboot as the top
+		 * rung). HW-tested 2026-10-29: a host-side re-bind of mhi-pci-generic, and
+		 * a PCI remove+rescan, both free a daemon wedged on the dead link but do
+		 * NOT clear an MHI SYSERR latch in the modem ("Failed to reset MHI due to
+		 * syserr state") - only a board reboot did.
+		 * See docs/qdm530/aer-hang.md.
+		 */
+		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M pci=noaer pcie_ports=compat";
 		stdout-path = "serial0:115200n8";
+	};
+
+	/*
+	 * ramoops/pstore: the external tlmm26 WDT reboots the board SILENTLY (no
+	 * panic, logread cleared), so the cause of the recurring reboots leaves no
+	 * trace. Carve 1 MiB of general DRAM just below the firmware reserve
+	 * (tz_apps@4a400000) for a persistent RAM console + function trace; a warm
+	 * WDT reset keeps DRAM, so the pre-reset state survives into /sys/fs/pstore.
+	 * KEPT after the AER hang was pinned with it: this board resets silently by
+	 * design (external WDT, no panic path), so without a persistent console a
+	 * future reset leaves no trace at all. The cost is 1 MiB of DRAM.
+	 */
+	reserved-memory {
+		ramoops@4a300000 {
+			compatible = "ramoops";
+			reg = <0x0 0x4a300000 0x0 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			ftrace-size = <0x40000>;
+			pmsg-size = <0x20000>;
+			ecc = <0x1>;
+		};
 	};
 
 	keys {

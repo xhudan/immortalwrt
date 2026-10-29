@@ -26,3 +26,13 @@ CONFIG_QCOM_TMEL_QMP_MAILBOX=y
 CONFIG_SPI_QPIC_SNAND=y
 CONFIG_STMMAC_ETH=y
 CONFIG_STMMAC_PLATFORM=y
+# pstore/ramoops console (qdm530 reboot forensics): persistent RAM console,
+# read from /sys/fs/pstore after a reset. Pairs with the ramoops@4a300000
+# reserved-memory node in the qdm530 DTS. Lightweight - no ftrace overhead.
+CONFIG_PSTORE=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_PMSG=y
+CONFIG_PSTORE_RAM=y
+CONFIG_REED_SOLOMON=y
+CONFIG_REED_SOLOMON_DEC8=y
+CONFIG_REED_SOLOMON_ENC8=y
