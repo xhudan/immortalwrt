@@ -81,6 +81,63 @@ rootfs and Quectel's out-of-tree `pcie_mhi`, which is what the vendor loads — 
 So there is no vendor trick to copy here, and swapping mainline's controller for Quectel's
 `pcie_mhi` would not change this outcome. Don't go looking again.
 
+### There is no modem power line on this board
+
+Checked against the **vendor DTB**, extracted from the QSDK kernel volume of the NAND
+backup (`model = "Qualcomm Technologies, Inc. IPQ5018/AP-MP03.6-C1"`). Every GPIO the
+vendor firmware drives:
+
+| GPIO | vendor property (node) | purpose |
+|---|---|---|
+| 13 | `gpios` (`gpio_keys/button@2`) | `wlan` button |
+| 15 | `perst-gpio` (`pci@a0000000`) | QCN9074 PERST |
+| **18** | **`perst-gpio` (`pci@80000000`)** | **modem PERST — the only modem control line** |
+| 24 | `device-power-gpio` (`usb3@8A00000`) | USB VBUS, not the modem |
+| 32 | `reset-gpio` | AW9523 RSTN |
+| 38 | `gpios` (`gpio_keys/button@1`) | `wps` button |
+| 39 | `phy-reset-gpio` | ethernet PHY reset |
+
+The modem's PCIe node carries **only** `perst-gpio`. No power GPIO, no `supply`
+property, and there is no GPIO-controlled regulator anywhere in the vendor DTB.
+`device-power-gpio` sits in the USB3/DWC3 node, and this port disables USB anyway (the
+combo PHY is committed to PCIe).
+
+**This is why wwand's `reset_gpio` / `repower_time` cannot power-cycle the modem here.**
+Those options exist to hold a modem's power (or reset) line asserted for
+`repower_time` seconds — they need such a line to drive, and this board does not have
+one. `usb_repower` is a no-op on a PCIe/MHI modem for the same reason. The recovery
+ladder consequently has nothing between *"reset the modem over QMI"* (which needs a
+modem that still answers) and *"reboot the board"*.
+
+### The one path still untested: a deliberate PERST toggle
+
+PERST# (GPIO 18) is the only modem line that exists, and on SDX6x it is normally wired
+to the modem's reset input — so unlike an MHI register reset (which needs the modem's
+firmware to cooperate), asserting it may reset the modem SoC outright. **It has not been
+tested**, because neither action tried on 2026-10-29 actually drives it:
+
+- unbinding `mhi-pci-generic` rebinds the **endpoint** driver; the host controller keeps
+  the link up and never touches PERST
+- `remove` + `rescan` re-enumerates from config space; the link is not brought down at
+  the host either
+- there is no FLR knob (`/sys/bus/pci/devices/0001:01:00.0/reset` does not exist), and
+  the root port has no secondary-bus-reset method (`reset_subordinate` → `-ENOTTY`)
+
+What *would* drive PERST is unbinding the **host controller**, which tears the link down
+and re-asserts PERST on the way back up. The modem's controller is `80000000.pcie`
+(domain `0001`; `a0000000.pcie` is the QCN9074 in domain `0000`):
+
+```sh
+echo 80000000.pcie > /sys/bus/platform/drivers/qcom-pcie/unbind
+echo 80000000.pcie > /sys/bus/platform/drivers/qcom-pcie/bind
+```
+
+Two caveats before trying it. It only means anything **while the modem is actually
+latched in SYSERR** — on a healthy modem it proves nothing. And it removes the whole PCI
+domain, not just the endpoint, so if the rebind fails the modem is gone until a reboot
+(which is the fallback anyway). If it does clear SYSERR, it is a far cheaper rung than
+rebooting the router, and worth wiring into the recovery ladder.
+
 ## Related
 
 - `patches-6.18/0958-bus-mhi-pci_generic-sdx-ip_hw0-ring-512.patch`,
