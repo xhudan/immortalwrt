@@ -18,7 +18,8 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/bus/mhi/host/pci_generic.c
 +++ b/drivers/bus/mhi/host/pci_generic.c
-@@ -318,8 +318,8 @@ static const struct mhi_channel_config modem_qcom_v1_mhi_channels[] = {
+@@ -318,8 +318,8 @@
+ 	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 0),
  	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 2),
  	MHI_CHANNEL_CONFIG_DL(47, "IP_SW0", 64, 3),
 -	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 128, 4),
@@ -26,5 +27,5 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 +	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 512, 4),
 +	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 512, 5),
  };
-
+ 
  static struct mhi_event_config modem_qcom_v1_mhi_events[] = {

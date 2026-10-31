@@ -19,6 +19,18 @@ pointer initialisation without supplying the replacement.
  the hash. Split from 0955 so that either can be removed once the kernel here
  supplies the corresponding change - if it gains only the functional fix, drop
  0955 and keep this; it does NOT mean either may be omitted on its own.]
+
+[The explanation above is LOCAL commentary, rewritten here - it is not the
+ upstream author's commit message reproduced verbatim, and should not be read as
+ his words. Only the code change is his.
+
+ No Signed-off-by from the author either: the upstream commit certainly carries
+ one, but it has not been read from here and inventing another person's DCO
+ certification is not an option. Mine is added as the person carrying it, which
+ is the part I can certify; recover and restore his trailer before this is ever
+ passed on anywhere that matters.]
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/spi/spi-qpic-snand.c
 +++ b/drivers/spi/spi-qpic-snand.c

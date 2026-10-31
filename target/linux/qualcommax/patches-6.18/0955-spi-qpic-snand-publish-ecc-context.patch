@@ -33,6 +33,18 @@ Fixes: 7304d1909080 ("spi: spi-qpic: add driver for QCOM SPI NAND flash Interfac
  the v2 thread and has not been verified against a clone of that tree. Kept
  split from its cleanup (0965) to mirror upstream, so that either can be
  dropped independently - a stable kernel may well take this one alone.]
+
+[The explanation above is LOCAL commentary, rewritten here - it is not the
+ upstream author's commit message reproduced verbatim, and should not be read as
+ his words. Only the code change is his.
+
+ No Signed-off-by from the author either: the upstream commit certainly carries
+ one, but it has not been read from here and inventing another person's DCO
+ certification is not an option. Mine is added as the person carrying it, which
+ is the part I can certify; recover and restore his trailer before this is ever
+ passed on anywhere that matters.]
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/spi/spi-qpic-snand.c
 +++ b/drivers/spi/spi-qpic-snand.c
