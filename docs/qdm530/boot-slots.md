@@ -17,7 +17,8 @@ A booted system is always presented to Linux as `rootfs`/`ubi0` regardless of th
 slot, so identify firmware by `board_name`/`uname`, never by the slot name. From ImmortalWrt:
 
 ```sh
-bootslot status
+bootslot status     # read-only: flag, which mtd each slot is, whether the copies agree
+bootslot inspect    # attaches the other slot's UBI to see what it holds (has side effects)
 ```
 ```
 BOOTCONFIG rootfs flag = 1   (switch would set it to 0)
@@ -36,18 +37,33 @@ kernel is also a FIT image, so magic cannot tell them apart):
 
 ImmortalWrt has no `/proc/boot_info` (that is a QSDK vendor-kernel driver), so `bootslot`
 edits the `BOOTCONFIG` struct on the mtd directly: it flips the rootfs flag (byte 128) in
-**both** copies, written identically from one read of the active copy, then verifies the
-read-back. Writing both copies identical keeps the bootloader's two copies consistent, so the
-redundancy/age counter is left untouched.
+**both** copies, written identically from one read of the active copy. Writing both copies
+identical keeps the bootloader's two copies consistent, so the redundancy/age counter is left
+untouched. Before writing it byte-compares the whole 336-byte record across both copies and
+refuses if they differ, and after each write it verifies that whole record rather than just
+the flag byte.
 
 ```sh
 bootslot switch     # refuses unless the other slot holds a valid UBI image
 reboot              # boots the other slot
 ```
 
-`bootslot switch` only rewrites `BOOTCONFIG`; nothing changes until you `reboot`. If the write
-were somehow ignored the board just boots the current slot again (no harm). HW-verified on this
-board to switch ImmortalWrt ⇄ the vendor slot.
+`bootslot switch` only rewrites `BOOTCONFIG`; nothing changes until you `reboot`.
+HW-verified on this board to switch ImmortalWrt ⇄ the vendor slot.
+
+**What this is NOT: atomic.** Two mtd partitions cannot be written atomically from userspace,
+and an earlier version of this note claimed a failed write meant "no harm", which was wrong.
+The real failure modes are a write to the second copy that fails part-way — leaving it erased
+or partly written — or a power loss between the two writes. Either leaves the two copies
+disagreeing, and the bootloader then picks from inconsistent data. What the script does about
+it: if the *second* write returns an error it tries to restore the first from the original
+bytes, so a failed write leaves one known-good old copy. That covers a returned error only;
+it cannot cover a power loss or a kill, because neither can run the restore.
+
+So after any failure during a switch: re-run `bootslot status`, which reports whether the two
+copies agree, and **do not reboot until it says they do**. On this board the only recovery
+from a bad boot is UART, so that check is the difference between an inconvenience and a
+soldering iron.
 
 ## Switch FROM the vendor firmware → the other slot  (`/proc/boot_info`)
 
