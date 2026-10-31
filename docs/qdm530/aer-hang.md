@@ -109,93 +109,163 @@ one. `usb_repower` is a no-op on a PCIe/MHI modem for the same reason. The recov
 ladder consequently has nothing between *"reset the modem over QMI"* (which needs a
 modem that still answers) and *"reboot the board"*.
 
-### PERST#: unreachable from userspace, reachable from the kernel
+### Three ways to recover the modem were tried. All three failed.
 
-PERST# (GPIO 18) is the only modem control line this board has, and on SDX6x it is
-normally wired to the modem's reset input -- so unlike an MHI register reset (which
-needs the modem's firmware to cooperate), asserting it may reset the modem SoC
-outright.
+The wedge this port keeps hitting leaves the modem unusable with no reset that
+works, so the recovery question was chased to the end. Recording the dead ends
+because each one looked right until it was tested.
 
-**No userspace path to it exists** (all verified on 6.18.54):
+**1. Re-bind the PCIe host controller from the kernel ("Fix A").**
+PERST# (GPIO 18) is the only modem control line this board has -- there is no
+power line, see above -- and `pcie-qcom` drives it in
+`qcom_ep_reset_{assert,deassert}()` around its probe. No userspace path reaches
+it: the GPIO is claimed by the driver, `qcom-pcie` sets `suppress_bind_attrs` so
+`/sys/bus/platform/drivers/qcom-pcie/` has no `bind`/`unbind`, runtime PM is
+pinned active by a `pm_runtime_get_sync()` with no matching put, and there is
+neither an FLR knob nor a secondary-bus-reset method (`reset_subordinate` ->
+`-ENOTTY`). From kernel code it *is* reachable, because that flag hides the
+sysfs attributes and not the capability, so `device_release_driver()` +
+`device_attach()` on the host bridge's parent re-runs host deinit/init.
 
-- the GPIO is claimed by the host controller driver
-  (`pcie-qcom.c`: `devm_gpiod_get_optional(dev, "perst", ...)`), so it never appears
-  in the gpio sysfs
-- `qcom-pcie` sets `suppress_bind_attrs`, so `/sys/bus/platform/drivers/qcom-pcie/`
-  has no `bind`/`unbind` -- only the device symlinks and `uevent`
-- runtime PM is pinned active: probe calls `pm_runtime_get_sync()` with no matching
-  put on the success path, and there are no runtime-PM ops, so `power/control`
-  cannot produce a suspend either
-- there is no FLR knob (`/sys/bus/pci/devices/0001:01:00.0/reset` does not exist) and
-  the root port has no secondary-bus-reset method (`reset_subordinate` -> `-ENOTTY`)
+Deliberately triggered (`AT+CFUN=1,1` crashes the modem's PCIe link, so
+`health_check` reads the vendor ID back as 0xffff) the chain fired exactly as
+designed, and then made things worse:
 
-`qcom_perst_assert()` is therefore reachable only from the driver's own host
-init/deinit (`qcom_ep_reset_assert` / `qcom_ep_reset_deassert`).
-
-**From kernel code it IS reachable**, and that is what the local "Fix A" does:
-`suppress_bind_attrs` only hides the sysfs attributes, it does not remove the
-capability, so `device_release_driver()` + `device_attach()` on the host bridge's
-parent still run host deinit/init -- and with them PERST assert/de-assert. Fix A adds
-to `drivers/bus/mhi/host/pci_generic.c`:
-
-```c
-device_release_driver(rb->host);   /* in-kernel equivalent of unbind */
-device_attach(rb->host);           /* ...and bind */
+```
+mhi-pci-generic 0001:01:00.0: Device died
+mhi-pci-generic 0001:01:00.0: Recovery failed: -25
+recovery: re-binding PCIe host 80000000.pcie to re-assert PERST# (no reboot)
+qcom-pcie 80000000.pcie: Unbalanced pm_runtime_enable!
+qcom-pcie 80000000.pcie: Phy link never came up
+qcom-pcie 80000000.pcie: probe with driver qcom-pcie failed with error -28
 ```
 
-scheduled from the recovery path:
+The controller was left unbound and the modem could not return until a reboot.
+Without the re-bind the controller stays bound and the modem has time to
+re-enumerate on its own -- the re-probe gave the link one second (549.0 ->
+550.0) while a modem restarting needs 20-30. And the deeper reason is not the
+timing: **`qcom-pcie` has no `.remove` callback at all** and never calls
+`pm_runtime_disable()`, which is what `suppress_bind_attrs` is saying. The
+teardown leaves runtime PM unbalanced, `dw_pcie_host_deinit()` unrun and the old
+PCI bus in place. Upstream is adding `shutdown()` to this driver, not
+`remove()`, and is not dropping `suppress_bind_attrs`.
 
-```c
-err_try_reset:
-	err = pci_try_reset_function(pdev);
-	if (err) {
-		dev_err(&pdev->dev, "Recovery failed: %d\n", err);
-		mhi_pci_schedule_host_rebind(pdev);
-	}
+**2. A PCI device-specific reset for 17cb:0308.**
+The SDX6x has a hardware reset -- the MHI SoC reset request at BAR0 + 0xb0 --
+and a pending upstream series registers it in `pci_dev_reset_methods[]`, which
+would make `pci_try_reset_function()` succeed so rung 1 is never reached. It was
+backported (modem entry only; the series' WLAN entries are 17cb:1103/1107 while
+this board carries a QCN9074, 17cb:1104, which already has a working reset).
+
+It registers and executes correctly. `/sys/bus/pci/devices/0001:01:00.0/reset`
+appeared, and writing to it drove a clean teardown:
+
+```
+mhi-pci-generic 0001:01:00.0: reset
+wwan wwan0: port wwan0qcdm0 disconnected   (and mbim0, qmi0, at0)
 ```
 
-**Its trigger is the limitation, not its mechanism.** It fires only after
-`mhi_pci_recovery_work()` has run and `pci_try_reset_function()` has failed. In the
-failures observed on 2026-10-28/29 that path never ran at all (`Recovery failed` and
-`Device died`: zero hits in dmesg, `rebind=0` in the field log), so PERST has still
-never actually been asserted. The mechanism is sound and untested, which is not the
-same as unavailable.
+Then the console stops. No `.reset_done`, no MHI power-on, UBIFS needing
+recovery on the next boot and **no new pstore panic record** -- a watchdog bite,
+not a panic. The reset write is not the problem: the console ran for two more
+seconds, through the quirk's `msleep(2000)`. The stall is in what follows, when
+the driver re-initialises MHI and does MMIO to a modem whose link is still down.
+Upstream tested the quirk on x86 desktops, where the host bridge synthesises an
+all-ones response instead of hanging.
 
-> WARNING: Fix A currently exists ONLY as an edit to the extracted source under
-> `build_dir`; it is not in `target/linux/qualcommax/patches-6.18/`. It is compiled
-> into `mhi_pci_generic.ko` (`CONFIG_MHI_BUS_PCI_GENERIC=m`) and ships in the built
-> image, but one `make dirclean` loses it. Capture it as a patch.
+**3. Enabling PCIe completion timeouts. Do not.**
+The root port has the capability -- `DevCap2 = 0x00001c1f` advertises all four
+ranges -- but `pcie-qcom` disables it: `qcom_pcie_post_init_2_9_0()` (the config
+`qcom,pcie-ipq5018` selects) writes `PCI_EXP_DEVCTL2_COMP_TMOUT_DIS`, and the
+root port reads back `DevCtl2 = 0x0410`. That is deliberate. On ARM64 Qualcomm
+parts a completion timeout does not synthesise an all-ones response the way x86
+root complexes do; it asserts **SError** -- asynchronous and unrecoverable --
+plus a storm of Completion Timeout AERs. Turning it on trades a hang the
+watchdog recovers from for a panic, and gains nothing.
+
+### The common root cause
+
+All three are the same failure in different clothes: **an access to a downed
+PCIe link never completes, and this SoC has no timeout to end it.** The AER
+handler hit it from an interrupt, the re-bind hit it during host re-probe, the
+quirk hit it during post-reset re-init. And because the external tlmm26 watchdog
+bites at ~1.5 s -- a hardware property of the supervisor chip, not a software
+setting; `hw_margin_ms` only controls how often the kernel feeds it -- any such
+stall becomes a silent board reset.
+
+### The actual fix, and when it can be taken
+
+Upstream's **outbound (ECAM) blocker** for `pcie-qcom`: on the link-down
+interrupt the driver enables `ECAM_BLOCKER_EN` in `PARF_SYS_CTRL` over the whole
+PCIe address space, so the hardware terminates these accesses locally instead of
+letting them hang. It covers IP revisions 2.3.3, 2.7.0 and **2.9.0, which is
+this board**.
+
+It is **not in any released kernel**: absent from v6.18 and v6.19, present only
+in mainline master, so v6.20 at the earliest. It cannot be backported alone --
+it needs the global-interrupt handler, `INT_ALL_LINK_DOWN` and
+`pci_host_handle_link_down()` (a PCI core addition), none of which 6.18 has; a
+dry run leaves 2 of 12 hunks failing and several others applying with fuzz. And
+bumping this tree's kernel for it is not sensible either: 544 patches would have
+to be forward-ported (176 generic backport, 201 pending, 67 hack, 100
+qualcommax) to reach a release that still does not contain the blocker.
+
+**When the kernel here reaches >= 6.20, in this order and separately:**
+
+1. take the outbound blocker;
+2. **keep `pci=noaer`** -- the blocker is best-effort by its author's own
+   account, with a race window between link-down and activation, and on this
+   board a stall in that window is a reboot rather than a logged error. The two
+   are complementary: the blocker catches accesses that happen, `noaer` removes
+   one source of them;
+3. only then re-evaluate the 17cb:0308 reset quirk, which may well be safe once
+   post-reset MMIO is terminated rather than hanging.
+
+Until then the modem's recovery is wwand's ladder reaching its reboot rung, and
+the mitigation that matters most is not a kernel patch at all: the band-lock fix
+took RSRP from -113 to -93 dBm, which removes the RF stress that triggers the
+modem SSRs in the first place.
 
 ### The vendor has no recovery for this at any layer
 
-Checked 2026-10-29 against the extracted QSDK rootfs, Quectel's out-of-tree
-`pcie_mhi` (what the vendor loads instead of mainline `mhi-pci-generic`), and the
-vendor kernel itself (LZMA inside the FIT in the `kernel` UBI volume):
+Checked against the extracted QSDK rootfs, Quectel's out-of-tree `pcie_mhi`
+(what the vendor loads instead of mainline `mhi-pci-generic`), and the vendor
+kernel itself (LZMA inside the FIT in the `kernel` UBI volume):
 
-- `mhi_qti.c mhi_power_up()`: on `MHI_STATE_SYS_ERR` it writes `MHI_STATE_RESET`,
-  polls for `timeout_ms`, and if the device is still in SYS_ERR **returns `-EIO` and
-  aborts the power-up** -- the same give-up mainline showed us.
-- `mhi_status_cb()` for `MHI_CB_SYS_ERROR`: only `pm_runtime_forbid()`. No recovery.
-- `mhi_pm_sys_err_worker()`: only `mhi_pm_disable_transition(MHI_PM_SYS_ERR_PROCESS)`
-  -- a teardown, not a recovery.
-- the endpoint's QSDK PCIe integration (`QCOM_AP_AND_EFUSE_PCIE_SLEEP`) registers for
-  `MSM_PCIE_EVENT_WAKEUP` only, and calls `msm_pcie_pm_control(SUSPEND/RESUME)`:
-  power management, never recovery. No `msm_pcie_recover*`, no link-down handler.
+- `mhi_qti.c mhi_power_up()`: on `MHI_STATE_SYS_ERR` it writes
+  `MHI_STATE_RESET`, polls for `timeout_ms`, and if the device is still in
+  SYS_ERR **returns `-EIO` and aborts** -- the same give-up mainline showed us.
+- `mhi_status_cb()` for `MHI_CB_SYS_ERROR`: only `pm_runtime_forbid()`.
+- `mhi_pm_sys_err_worker()`: only `mhi_pm_disable_transition()` -- a teardown.
+- the endpoint's QSDK PCIe integration (`QCOM_AP_AND_EFUSE_PCIE_SLEEP`)
+  registers for `MSM_PCIE_EVENT_WAKEUP` only and calls
+  `msm_pcie_pm_control(SUSPEND/RESUME)`: power management, never recovery.
 - the vendor kernel does carry a debugfs menu with `enumerate: de-assert PERST,
-  enumerate PCIe` / `linkdown: bring down PCIe link` -- but it belongs to **cnss2
-  (WLAN)**, not the modem: the neighbouring strings are `cnss/dev_boot`,
-  `cnss/reg_read`, `cnss/runtime_pm`, `WLAN_EN`.
-- no userspace script in the vendor rootfs resets, re-powers or "refreshes" the modem.
+  enumerate PCIe` / `linkdown: bring down PCIe link`, but it belongs to **cnss2
+  (WLAN)**, not the modem -- its neighbours are `cnss/dev_boot`,
+  `cnss/reg_read`, `WLAN_EN`.
+- no userspace script in the vendor rootfs resets, re-powers or refreshes it.
 
-Structurally the vendor could not fix it anyway: in this failure the **PCIe link stays
-up** (it trains at 5 GT/s x1 while MHI is dead), so no PCIe-layer mechanism has an
-event to react to, and the MHI layer -- the only one that knows -- never signals the
-PCIe layer. Nothing connects the two. Fix A is precisely that missing connection,
-which is why it is novel rather than copied.
+Structurally the vendor could not fix it anyway: in this failure the PCIe link
+stays up (it trains at 5 GT/s x1 while MHI is dead), so no PCIe-layer mechanism
+has an event to react to, and the MHI layer -- the only one that knows -- never
+signals the PCIe layer.
 
-One thing the vendor does expose that mainline does not: `mhi_debugfs_trigger_reset`
-(plus `_m0`/`_m3`). It drives the same MHI reset that gives up under SYS_ERR, so it is
-a manual handle on a known-insufficient mechanism, not a new one.
+One thing the vendor exposes that mainline does not:
+`mhi_debugfs_trigger_reset` (plus `_m0`/`_m3`). It drives the same MHI reset
+that gives up under SYS_ERR, so it is a manual handle on a known-insufficient
+mechanism.
+
+### Reproducing the wedge on purpose
+
+`AT+CFUN=1,1` through `/dev/wwan0at0` (patch 0960's channel) crashes the modem's
+PCIe link reliably, which is what `health_check` detects -- it reads the PCI
+vendor ID and only treats 0xffff/0 as death, so it catches a **link** loss and
+not an MHI-level wedge. That is why `Device died` never appeared during the
+40-hour freeze on 28 Oct, when MHI was dead but the link was up.
+
+Do not use `AT+QPOWD`: it powers the modem down and it does not come back
+without a power cycle.
 
 ## Related
 
