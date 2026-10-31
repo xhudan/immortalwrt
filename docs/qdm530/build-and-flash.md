@@ -83,10 +83,22 @@ slot to be presented to Linux as `rootfs`/`ubi0`**, so a booted system always sh
 ### 4a. UART / TFTP — recommended, the only recoverable path
 Needs the **serial console** (front RJ12 port, see `README.md` → "Boot, console and
 recovery"); U-Boot stops at a password prompt (`quectel`). Serve the `initramfs-uImage.itb`
-from a host at `192.168.10.19` (the U-Boot `serverip`), RAM-boot it, then from the booted
-initramfs `sysupgrade` the `factory.ubi` (or write the UBI to both `rootfs`/`rootfs_1`
-slots). See `tools/tftp-recovery-setup.sh` and `bootloop-postmortem.md`. Recoverable: if a
-flash goes wrong the serial console gets you back into U-Boot.
+from a host at `192.168.10.19` (the U-Boot `serverip`) and RAM-boot it. See
+`tools/tftp-recovery-setup.sh` and `bootloop-postmortem.md`. Recoverable: if a flash goes
+wrong the serial console gets you back into U-Boot.
+
+**What this section does NOT give you is the U-Boot side of that.** The helper only prepares
+the workstation; the actual `tftpboot`/`bootm` sequence is not written down here. Until it is,
+treat 4a as "serve the image and have the console", not as a complete procedure.
+
+**And do not `sysupgrade` the `factory.ubi`** — an earlier version of this line said to, and it
+is wrong in this tree. `IMAGE/factory.ubi := append-ubi` carries **no metadata**, while
+`ipq50xx/base-files/lib/upgrade/platform.sh` sets `REQUIRE_IMAGE_METADATA=1`, so
+`fwtool_check_image()` rejects it. Forcing it past that check with `-F` is not the answer: it
+skips the compatibility check this board's A/B layout is the reason for. Either
+`sysupgrade` the **`sysupgrade.bin`** (which does carry metadata — that is the normal upgrade
+path, §5), or write the UBI directly as 4b does with `ubiformat`, which is the path that was
+actually HW-verified here. The combination "sysupgrade the factory.ubi" was never tested.
 
 ### 4b. Non-UART from the vendor root shell — advanced, NO recovery net
 If you have root SSH on the vendor firmware and no serial cable, install by writing the

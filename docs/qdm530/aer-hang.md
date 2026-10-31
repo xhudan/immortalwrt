@@ -132,9 +132,10 @@ The wedge this port keeps hitting leaves the modem unusable with no reset that
 works, so the recovery question was chased to the end. Recording the dead ends
 because each one looked right until it was tested.
 
-A fourth approach is now carried in the tree and has **never been executed** — see
-*"A fourth attempt, untested"* at the end. It is not a fix and is not presented as
-one; it is listed so that nobody reads the three failures below as the final word.
+A further approach is carried in the tree and has **never been executed** — see
+*"Unvalidated follow-up"* at the end. It is not a fourth data point and not a recovery
+procedure; it is recorded so that nobody reads the three measured failures below as the
+final word, and so the attempt is not rediscovered from scratch.
 
 **1. Re-bind the PCIe host controller from the kernel ("Fix A").**
 PERST# (GPIO 18) is the only modem control line this board has -- there is no
@@ -242,7 +243,7 @@ qualcommax) to reach a release that still does not contain the blocker.
 3. only then re-evaluate the 17cb:0308 reset quirk, which may well be safe once
    post-reset MMIO is terminated rather than hanging.
 
-### A fourth attempt, untested
+### Unvalidated follow-up — not a recovery procedure
 
 `0963-PCI-add-a-host-bridge-link-recovery-hook.patch` adds a `->link_recover` hook to
 `struct pci_host_bridge`, implements it in `pcie-qcom` as a deinit/PERST/init/setup_rc/
@@ -254,13 +255,15 @@ It exists because each earlier attempt had half of it right. The host re-bind cy
 PERST# but left `qcom-pcie` unbound for good; the reset quirk cleared the modem's
 SYSERR but then stalled re-initialising an endpoint across a link that was not up yet.
 
-**Nothing here is established.** It builds and it survived several review rounds, but
-no recovery has ever been run on this board, and whether PERST# actually returns this
-modem from either observed wedge mode — link down after an SSR, and link up with MHI
-SYSERR latched — remains exactly as unproven as it was before the patch existed. The
-patch is the experiment, not the result, and this section is in the document only so
-the attempt is on the record rather than rediscovered. It will either move up into the
-history above as a fourth failure, or out of it as a fix, once it has been run.
+**What is established:** it compiles, the implementation is what the paragraphs above
+describe, and it survived several review rounds against the MHI and PCI source.
+
+**What is not:** anything about recovery. No recovery has ever been run on this board, and
+both observed wedge modes remain exactly as unresolved as they were before the patch
+existed — link down after an SSR, and link up with MHI SYSERR latched while
+`health_check` still reads a valid vendor ID. The patch is the experiment, not the result.
+It will either move up into the measured history above as a fourth failure, or out of this
+section as a fix, once it has been run.
 
 Until then the modem's recovery is wwand's ladder reaching its reboot rung, and
 the mitigation that matters most is not a kernel patch at all: the band-lock fix
