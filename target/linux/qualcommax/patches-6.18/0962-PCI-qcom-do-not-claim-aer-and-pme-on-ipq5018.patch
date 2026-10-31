@@ -1,0 +1,119 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] PCI: qcom: do not claim the native AER and PME services on
+ IPQ5018
+
+On IPQ5018 a CPU access to a downed PCIe link never completes - it hangs rather
+than failing. That makes the two port services which walk config space when
+something goes wrong unusable: when an endpoint drops its link (a 5G modem on
+pcie1 does this on every subsystem restart) the AER service's aer_isr() ->
+pci_walk_bus() -> dw_pcie_rd_other_conf() hangs the CPU instead of reporting an
+error, and PME walks config space the same way on an error. On a CPE with a
+1.5 s external watchdog, proven with pstore-ftrace, that hang is a silent reboot.
+
+Clear host->native_aer and host->native_pme, which is what portdrv checks in
+get_port_device_capability() unless pcie_ports=native overrides it, so those two
+services are not instantiated on this host.
+
+The flags have to be cleared in qcom_pcie_host_init() rather than after
+dw_pcie_host_init() returns: that function calls pci_host_probe(), which is what
+creates and binds the port service devices, so clearing them afterwards would be
+too late. dw_pcie_host_init() allocates pp->bridge before invoking this callback,
+so it is available there.
+
+Scope this to IPQ5018 with its own cfg rather than to every platform sharing
+ops_2_9_0. Those SoCs - IPQ6018, IPQ8074 Gen3, IPQ9574 - do all disable the PCIe
+completion timeout in qcom_pcie_post_init_2_9_0(), which is a necessary
+condition for this behaviour, but that is not evidence that their CPU-facing
+interconnects handle a dead-link transaction the same way. Only IPQ5018 has been
+shown to. Both of its hosts get the suppression, which is right for a host
+limitation rather than a modem-only quirk.
+
+This provides a scoped alternative to the pci=noaer and pcie_ports=compat kernel
+arguments such a board otherwise needs, which disable AER machine-wide and put
+every port service on every host into compat mode. It is not equivalent: compat
+suppresses more than these two flags, pcie_ports=native overrides them, and the
+remaining services stay eligible on their own terms. None of those performs the
+AER source-discovery walk, but hotplug can enumerate and remove downstream
+devices, so a board enabling it should look at this itself.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -258,6 +258,13 @@
+ 	bool override_no_snoop;
+ 	bool firmware_managed;
+ 	bool no_l0s;
++	/*
++	 * The port services that walk config space on an error (AER, PME)
++	 * cannot be used on this host: a CPU access to a downed link never
++	 * completes, so the walk hangs instead of failing. See
++	 * qcom_pcie_host_init().
++	 */
++	bool no_native_port_services;
+ };
+ 
+ struct qcom_pcie_port {
+@@ -1293,6 +1300,33 @@
+ 	struct qcom_pcie *pcie = to_qcom_pcie(pci);
+ 	int ret;
+ 
++	/*
++	 * Keep the kernel from claiming the port services that walk config
++	 * space when something goes wrong. On this host a CPU access to a
++	 * downed link never completes, so when an endpoint drops the link the
++	 * AER service's aer_isr() -> pci_walk_bus() -> dw_pcie_rd_other_conf()
++	 * hangs the CPU rather than reporting an error, and PME walks config
++	 * space the same way on an error.
++	 *
++	 * This has to happen here rather than after dw_pcie_host_init()
++	 * returns: that function calls pci_host_probe(), which is what creates
++	 * and binds the port service devices, so clearing the flags afterwards
++	 * would be too late. dw_pcie_host_init() allocates pp->bridge before
++	 * invoking this callback, so it is available here.
++	 *
++	 * portdrv checks host->native_aer / native_pme in
++	 * get_port_device_capability(), unless pcie_ports=native overrides
++	 * them. Other services - hotplug, DPC, bandwidth control - stay
++	 * eligible on their own terms; none of them performs the AER
++	 * source-discovery walk, but hotplug can enumerate and remove
++	 * downstream devices, so a board that enables it wants its own look at
++	 * this.
++	 */
++	if (pcie->cfg->no_native_port_services) {
++		pp->bridge->native_aer = false;
++		pp->bridge->native_pme = false;
++	}
++
+ 	qcom_ep_reset_assert(pcie);
+ 
+ 	ret = pcie->cfg->ops->init(pcie);
+@@ -1479,6 +1513,19 @@
+ 	.ops = &ops_2_9_0,
+ };
+ 
++/*
++ * Same operations as cfg_2_9_0, but with the native AER/PME services
++ * suppressed. The dead-link hang this avoids has only been demonstrated on
++ * IPQ5018; the other SoCs sharing ops_2_9_0 also disable the PCIe completion
++ * timeout in qcom_pcie_post_init_2_9_0(), which is a necessary condition but
++ * not evidence that their CPU-facing interconnect behaves the same way, so they
++ * keep the default behaviour until someone shows otherwise on that hardware.
++ */
++static const struct qcom_pcie_cfg cfg_2_9_0_ipq5018 = {
++	.ops = &ops_2_9_0,
++	.no_native_port_services = true,
++};
++
+ static const struct qcom_pcie_cfg cfg_sc8280xp = {
+ 	.ops = &ops_1_21_0,
+ 	.no_l0s = true,
+@@ -2036,7 +2083,7 @@
+ 	{ .compatible = "qcom,pcie-apq8064", .data = &cfg_2_1_0 },
+ 	{ .compatible = "qcom,pcie-apq8084", .data = &cfg_1_0_0 },
+ 	{ .compatible = "qcom,pcie-ipq4019", .data = &cfg_2_4_0 },
+-	{ .compatible = "qcom,pcie-ipq5018", .data = &cfg_2_9_0 },
++	{ .compatible = "qcom,pcie-ipq5018", .data = &cfg_2_9_0_ipq5018 },
+ 	{ .compatible = "qcom,pcie-ipq6018", .data = &cfg_2_9_0 },
+ 	{ .compatible = "qcom,pcie-ipq8064", .data = &cfg_2_1_0 },
+ 	{ .compatible = "qcom,pcie-ipq8064-v2", .data = &cfg_2_1_0 },
