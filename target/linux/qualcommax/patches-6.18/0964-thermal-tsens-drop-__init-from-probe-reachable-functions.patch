@@ -19,6 +19,24 @@ Drop the annotation from all eight. Fixing only the entry point is not enough
 while the init_common() it calls is still annotated. The declaration of
 init_common() in tsens.h never carried __init, so it needs no change.
 
+Independently found and fixed with the same mechanism - the same eight functions
+across the same four files - by samcday, reported there against a Galaxy A5 SD
+where the MODULAR tsens driver resumes deferred probing after its module init
+section has been freed:
+
+  https://github.com/samcday/linux/pull/13
+
+That is a different trigger for the same root cause: callbacks living in an init
+section that is released while the ops table still points at them. Theirs is a
+module's init text with a deferred probe, ours is a built-in's init text with a
+late probe on IPQ5018. Two independent reproductions on unrelated hardware, and
+neither appears to have been submitted upstream, so this wants sending with both
+reported rather than as a single-platform curiosity.
+
+The brace placement on init_8939() and init_8956() is fixed here as well, since
+these lines are being touched anyway and checkpatch wants the brace on its own
+line.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/thermal/qcom/tsens.c
@@ -52,16 +70,17 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  {
  	int i;
  
-@@ -240,7 +240,7 @@
+@@ -240,7 +240,8 @@
  	return init_common(priv);
  }
  
 -static int __init init_8939(struct tsens_priv *priv) {
-+static int init_8939(struct tsens_priv *priv) {
++static int init_8939(struct tsens_priv *priv)
++{
  	priv->sensor[0].slope = 2911;
  	priv->sensor[1].slope = 2789;
  	priv->sensor[2].slope = 2906;
-@@ -255,7 +255,7 @@
+@@ -255,7 +256,7 @@
  	return init_common(priv);
  }
  
@@ -72,16 +91,17 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  
 --- a/drivers/thermal/qcom/tsens-v1.c
 +++ b/drivers/thermal/qcom/tsens-v1.c
-@@ -145,7 +145,7 @@
+@@ -145,7 +145,8 @@
  	[TRDY] = REG_FIELD(TM_TRDY_OFF, 0, 0),
  };
  
 -static int __init init_8956(struct tsens_priv *priv) {
-+static int init_8956(struct tsens_priv *priv) {
++static int init_8956(struct tsens_priv *priv)
++{
  	priv->sensor[0].slope = 3313;
  	priv->sensor[1].slope = 3275;
  	priv->sensor[2].slope = 3320;
-@@ -161,7 +161,7 @@
+@@ -161,7 +162,7 @@
  	return init_common(priv);
  }
  
