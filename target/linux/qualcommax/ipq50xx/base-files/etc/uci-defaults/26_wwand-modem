@@ -25,8 +25,9 @@
 # reboot at `failreboot` + 1. The defaults (8/16/24, failreboot 100) are tuned
 # for boards where the rungs can actually do something; two of them cannot here:
 #   - `usb_repower`, the third rung, is a GUARANTEED no-op on this board. It
-#     pulses a modem power/reset line, and there is none - the vendor DTB gives
-#     the modem's PCIe node only `perst-gpio` (GPIO 18), no power GPIO, no
+#     pulses a modem power or reset line of the kind wwand can drive, and there
+#     is none: the vendor DTB gives the modem's PCIe node only `perst-gpio`
+#     (GPIO 18) - which the PCIe host driver owns, not wwand - no power GPIO, no
 #     supply, no GPIO regulator (see docs/qdm530/aer-hang.md).
 #   - `opmode_cycle` and `modem_reset` are QMI commands, so they need a modem
 #     that still answers. A modem latched in MHI SYSERR does not, and nothing

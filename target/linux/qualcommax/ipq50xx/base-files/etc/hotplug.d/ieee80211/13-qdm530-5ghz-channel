@@ -30,18 +30,22 @@
 have_5g=0
 changed=0
 
+# Seed only what is ABSENT. An earlier version re-asserted channel/htmode/country
+# on every event, which silently reverted anything the operator had deliberately
+# changed - a default belongs at first boot, not enforced for the life of the
+# device. Note that a configured 5 GHz section is not proof the radio is present;
+# it only means one was detected at some point.
 fixup_5g() {
 	local radio="$1" band
 	config_get band "$radio" band
 	[ "$band" = "5g" ] || return 0
 	have_5g=1
-	[ "$(uci -q get "wireless.$radio.channel")" = "36" ] &&
-	[ "$(uci -q get "wireless.$radio.htmode")" = "HE160" ] &&
-	[ "$(uci -q get "wireless.$radio.country")" = "CN" ] && return 0
-	uci -q set "wireless.$radio.channel=36"
-	uci -q set "wireless.$radio.htmode=HE160"
-	uci -q set "wireless.$radio.country=CN"
-	changed=1
+	[ -n "$(uci -q get "wireless.$radio.channel")" ] || {
+		uci -q set "wireless.$radio.channel=36"; changed=1; }
+	[ -n "$(uci -q get "wireless.$radio.htmode")" ] || {
+		uci -q set "wireless.$radio.htmode=HE160"; changed=1; }
+	[ -n "$(uci -q get "wireless.$radio.country")" ] || {
+		uci -q set "wireless.$radio.country=CN"; changed=1; }
 }
 
 config_load wireless

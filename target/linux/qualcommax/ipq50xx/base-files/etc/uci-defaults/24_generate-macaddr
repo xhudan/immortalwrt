@@ -18,17 +18,55 @@
 
 [ "$(board_name)" = "unbranded,qdm530" ] || exit 0
 
-# only touch the LAN bridge device, and only if it is really br-lan
-[ "$(uci -q get network.@device[0].name)" = "br-lan" ] || exit 0
+# Locate the LAN bridge by name rather than assuming it is @device[0], and walk
+# every device section rather than a fixed number of them.
+# Walk by section existence, not by whether a section happens to have a name:
+# a nameless device section earlier in the list would otherwise stop the search
+# before br-lan is reached.
+dev=""
+i=0
+while uci -q get "network.@device[$i]" >/dev/null 2>&1; do
+	if [ "$(uci -q get "network.@device[$i].name")" = "br-lan" ]; then
+		dev="network.@device[$i]"
+		break
+	fi
+	i=$((i + 1))
+done
+[ -n "$dev" ] || exit 0
 
 # keep an already-assigned address (preserved across sysupgrade)
-[ -n "$(uci -q get network.@device[0].macaddr)" ] && exit 0
+[ -n "$(uci -q get "$dev.macaddr")" ] && exit 0
 
-# random unicast (bit0=0), locally-administered (bit1=1) MAC
-octet0=$(printf '%02x' $(( (0x$(hexdump -n1 -e '"%02x"' /dev/urandom) & 0xfe) | 0x02 )))
-rest=$(hexdump -n5 -e '5/1 ":%02x"' /dev/urandom)
+# Random unicast (bit0=0), locally-administered (bit1=1) MAC. Built from the
+# kernel's UUID source rather than hexdump: busybox here does not necessarily
+# provide hexdump or od, and a silent failure would leave the board on the
+# placeholder address that this exists to replace.
+hex=$(tr -d - < /proc/sys/kernel/random/uuid)
+[ "${#hex}" -ge 12 ] || { echo "24_generate-macaddr: no usable random source" >&2; exit 1; }
 
-uci -q set network.@device[0].macaddr="${octet0}${rest}"
-uci -q commit network
+o0=$(printf '%02x' $(( (0x${hex%"${hex#??}"} & 0xfe) | 0x02 )))
+rest=${hex#??}
+mac="$o0"
+n=0
+while [ "$n" -lt 5 ]; do
+	mac="$mac:${rest%"${rest#??}"}"
+	rest=${rest#??}
+	n=$((n + 1))
+done
+
+# Check the digits, not just the shape: a partially built address would still
+# match ??:??:??:??:??:?? and would then be committed.
+H="[0-9a-f]"
+case "$mac" in
+	$H$H:$H$H:$H$H:$H$H:$H$H:$H$H) ;;
+	*) echo "24_generate-macaddr: refusing to set malformed '$mac'" >&2; exit 1 ;;
+esac
+
+# A silent uci failure here is the whole failure mode this script exists to
+# avoid, so check it and verify the value landed before declaring success.
+uci -q set "$dev.macaddr=$mac" || { echo "24_generate-macaddr: uci set failed" >&2; exit 1; }
+uci -q commit network || { echo "24_generate-macaddr: uci commit failed" >&2; exit 1; }
+[ "$(uci -q get "$dev.macaddr")" = "$mac" ] || {
+	echo "24_generate-macaddr: $mac did not persist" >&2; exit 1; }
 
 exit 0

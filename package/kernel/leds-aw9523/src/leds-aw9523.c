@@ -125,6 +125,17 @@ static int aw9523_hw_init(struct device *dev, struct aw9523 *chip)
 	return regmap_write(chip->regmap, AW9523_REG_LED_MODE(1), 0xff);
 }
 
+static bool aw9523_channel_taken(const struct aw9523 *chip, u32 channel)
+{
+	unsigned int i;
+
+	for (i = 0; i < chip->num_leds; i++)
+		if (chip->leds[i].channel == channel)
+			return true;
+
+	return false;
+}
+
 static int aw9523_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -171,6 +182,23 @@ static int aw9523_probe(struct i2c_client *client)
 			dev_err(dev, "reg %u out of range (0..%u)\n",
 				channel, AW9523_NUM_CHANNELS - 1);
 			continue;
+		}
+
+		/*
+		 * Range-checking the channel is not enough on its own: the
+		 * array is indexed by the count of LEDs accepted so far, so
+		 * duplicate reg values or more children than there are
+		 * channels would walk past the end of it.
+		 */
+		if (aw9523_channel_taken(chip, channel)) {
+			dev_err(dev, "reg %u listed more than once\n", channel);
+			continue;
+		}
+
+		if (chip->num_leds >= AW9523_NUM_CHANNELS) {
+			dev_err(dev, "too many LED children, at most %u\n",
+				AW9523_NUM_CHANNELS);
+			break;
 		}
 
 		led = &chip->leds[chip->num_leds];

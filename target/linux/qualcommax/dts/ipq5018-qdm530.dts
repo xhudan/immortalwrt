@@ -483,11 +483,12 @@
  * phy-mux (0x10540). This board uses pcie1 for the modem WAN, so the combo PHY
  * must stay with PCIe: enabling the USB3 PHY flips the mux to USB and the pcie1
  * PHY then reads all-zero and the modem never trains (see &usbphy1 and
- * docs/qdm530/pcie1-modem-combo-phy.md). And mainline dwc3 refuses to register
- * its core without the SuperSpeed PHY ("dwc3-qcom: failed to register DWC3 Core"
- * / xhci "can't setup: -110"), so there is no USB2-only fallback - with usbphy1
- * off the whole dwc3 controller is dead. Rather than leave it stuck in a
- * permanent deferred-probe failure, the controller and its HS PHY are disabled.
+ * docs/qdm530/pcie1-modem-combo-phy.md). With usbphy1 off, dwc3 as configured on
+ * THIS board did not come up either ("dwc3-qcom: failed to register DWC3 Core"
+ * / xhci "can't setup: -110"); no USB2-only configuration was attempted, so
+ * whether one is possible here is untested rather than ruled out. Rather than
+ * leave the controller stuck in a permanent probe failure, it and its HS PHY
+ * are disabled.
  *
  * Consequence: no USB host on the board - the modem's USB AT/DIAG ports do NOT
  * enumerate and a USB-tethering/dongle WAN is not available. The modem is
