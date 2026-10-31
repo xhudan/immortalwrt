@@ -1,0 +1,640 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] PCI: add a host-bridge link-recovery hook and use it to revive
+ a wedged MHI endpoint
+
+An endpoint that drops the PCIe link cannot be recovered from the endpoint side,
+and on some hosts it must not even be touched while the link is down: on
+Qualcomm IP rev 2.9.0 a CPU access to a downed link never completes, so it hangs
+rather than failing (see the preceding patch for why the completion timeout is
+off). On an IPQ5018 CPE with a 5G modem on pcie1 and a 1.5 s external watchdog,
+that hang is a silent reboot.
+
+What can recover such a link is PERST# plus a controller re-init, which only the
+host driver can do. Re-probing it is not available: qcom-pcie has no ->remove and
+sets suppress_bind_attrs, so device_release_driver() + device_attach() leaves the
+controller unbound for good, which is strictly worse than doing nothing. A
+device-specific endpoint reset does not help either, because re-initialising the
+endpoint still has to cross a link that is not up yet.
+
+The sequence is already in the host driver, just unreachable at runtime:
+qcom_pcie_suspend_noirq() calls ->deinit when the link is down and
+qcom_pcie_resume_noirq() calls ->init to bring it back, both on an
+already-probed controller, and dw_pcie_resume_noirq() shows the full
+init/setup_rc/start_link shape. Add a ->link_recover hook to struct
+pci_host_bridge so a host driver can offer it, implement it for qcom with an
+elapsed-time link-up deadline long enough for an endpoint that reboots its own
+firmware (dw_pcie_wait_for_link()'s bound is well under a second; this modem has
+been observed to need 20-30 s), and call it from mhi-pci-generic.
+
+The hook's contract is what makes it usable: 0 means the link is up and the
+controller is powered, so the caller may address the endpoint again - a statement
+about the host at that instant, not a promise that the endpoint is ready, that it
+is the same endpoint, or that the link will still be up for the next access. The
+qcom implementation touches only SoC-local resources: clocks, PHY, the PERST#
+GPIO, DBI and the local link-status register. That audit is specific to
+cfg_2_9_0, since cfg_2_7_0's qcom_pcie_host_post_init_2_7_0() walks the PCI bus,
+so the implementation refuses every other variant. Hardware-off state is tracked
+separately from ->suspended because a failed recovery leaves clocks and PHY down
+and a retry must not release them twice.
+
+On the MHI side this is one operation rather than separate quiesce/relink/restore
+triggers, so no caller can run the phases out of order, and the recovery mutex is
+held across all of it - the runtime-PM manipulation and the teardown included.
+Publishing a "recovery in progress" flag before taking the lock would let a
+second writer see the flag, skip the teardown as though it had already happened,
+and reset the host underneath a still-running MHI stack.
+
+Runtime PM is excluded with __pm_runtime_disable() rather than a usage reference
+or a flag tested inside the driver's PM callbacks: a usage reference only
+prevents idle suspension, and checking inside the callbacks excludes the wrong
+layer, because pci_pm_runtime_resume() restores config space via
+pci_pm_default_resume_early() before the driver callback is reached at all. It is
+called with check_resume = false rather than through the pm_runtime_disable()
+wrapper, which passes true and so deliberately carries out a pending resume
+first - on a PCI device that means restoring endpoint configuration across the
+very link this exists because it cannot be touched. The barrier that waits out an
+already-running transition is kept either way, and MHI_PCI_DEV_SUSPENDED is
+re-checked after it, since a suspend in flight when this started may have
+completed meanwhile.
+
+Quiescing the device needs more than powering MHI down: MHI_PCI_DEV_QUIESCED
+stops health_check() queueing recovery and makes mhi_pci_recovery_work() return
+early, and the worker is cancelled, then the timer deleted, then the worker
+cancelled again, because the timer can queue it in between and that worker would
+otherwise run a stale recovery after the device is back.
+mhi_power_down(graceful=false) then forces MHI_PM_LD_ERR_FATAL_DETECT, which
+MHI_REG_ACCESS_VALID() excludes, so the MHI core stops accessing registers.
+
+Because the hook cycles the whole link, the caller first checks that this
+endpoint really is the only device under the host - off its single root port,
+with no siblings and nothing below it - and refuses otherwise. Before restoring
+the saved configuration the endpoint's identity is checked, since a device that
+came back in a different mode would otherwise be given another device's BARs. A
+device that is already runtime-suspended is rejected rather than handled, as
+reconciling that would mean resuming the endpoint over the link this exists to
+avoid using. On failure the device stays quiesced with runtime PM disabled, so
+the write can simply be retried.
+
+A single write-only attribute drives it ("recover", or "recover <timeout_ms>"),
+so a userspace modem supervisor can use it as a recovery step before falling back
+to rebooting the board.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -637,6 +637,29 @@
+ 			resource_size_t start,
+ 			resource_size_t size,
+ 			resource_size_t align);
++
++	/*
++	 * Optional host-controller-driven link recovery: cycle the link
++	 * (typically PERST# plus a controller re-init) using only resources
++	 * local to the host, touching nothing downstream.
++	 *
++	 * @timeout_ms bounds the wait for the link to come back; 0 means the
++	 * implementation's default, and an implementation may clamp a value it
++	 * considers unreasonable rather than fail - a caller has usually
++	 * stopped using the endpoint before calling, so failing late on an
++	 * argument would leave it down for no reason.
++	 *
++	 * Returns 0 once the link is up again and the controller is powered.
++	 * That is a statement about the host at that instant: it does not mean
++	 * the endpoint is ready, that it is the same endpoint, or that the link
++	 * will still be up for the caller's next access.
++	 *
++	 * The whole link is cycled, so every device below the host is reset.
++	 * The caller is responsible for having quiesced them. May sleep.
++	 */
++	int (*link_recover)(struct pci_host_bridge *bridge,
++			    unsigned int timeout_ms);
++
+ 	unsigned long	private[] ____cacheline_aligned;
+ };
+ 
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -20,6 +20,7 @@
+ #include <linux/kernel.h>
+ #include <linux/limits.h>
+ #include <linux/init.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/of_pci.h>
+ #include <linux/pci.h>
+@@ -284,6 +285,13 @@
+ 	struct dentry *debugfs;
+ 	struct list_head ports;
+ 	bool suspended;
++	/*
++	 * Set while the controller's clocks and PHY are off because a link
++	 * recovery failed. Distinct from @suspended: it says the HARDWARE is
++	 * down, not that the system is asleep, and it is what keeps a retry
++	 * from releasing resources it has already released.
++	 */
++	bool relink_hw_off;
+ 	bool use_pm_opp;
+ };
+ 
+@@ -1802,6 +1810,164 @@
+ 	return 0;
+ }
+ 
++/*
++ * Host-side link recovery.
++ *
++ * When an endpoint drops the PCIe link - an SDX6x modem does this on every
++ * subsystem restart - the only thing that can bring it back on this hardware is
++ * PERST# plus a controller re-init, and the endpoint cannot be touched to get
++ * there: a CPU access to a downed link never completes here, so an access that
++ * would merely fail elsewhere hangs the CPU. Re-probing the controller is not an
++ * option either - qcom-pcie has no ->remove and sets suppress_bind_attrs, so
++ * device_release_driver() leaves it unbound for good.
++ *
++ * Everything here is local SoC MMIO plus the PERST# GPIO: ->deinit/->init are
++ * the same callbacks qcom_pcie_suspend_noirq()/qcom_pcie_resume_noirq() already
++ * run on this very controller once the link is down, dw_pcie_setup_rc() writes
++ * only DBI, and dw_pcie_link_up() reads a local status register. That audit was
++ * done for the IPQ5018 configuration; it does not hold for every variant
++ * (cfg_2_7_0's qcom_pcie_host_post_init_2_7_0() walks the PCI bus to set ASPM),
++ * so this refuses to run anywhere else.
++ */
++#define QCOM_PCIE_RELINK_PERST_MS	100
++#define QCOM_PCIE_RELINK_POLL_MS	100
++#define QCOM_PCIE_RELINK_TIMEOUT_MS	30000
++#define QCOM_PCIE_RELINK_TIMEOUT_MAX	60000
++
++/* One controller at a time; serialises recovery against itself. */
++static DEFINE_MUTEX(qcom_pcie_relink_mutex);
++
++static int qcom_pcie_relink(struct qcom_pcie *pcie, unsigned int timeout_ms)
++{
++	struct dw_pcie *pci = pcie->pci;
++	struct dw_pcie_rp *pp = &pci->pp;
++	unsigned long deadline, started;
++	int ret;
++
++	if (pcie->suspended)
++		return -EBUSY;
++
++	/*
++	 * Tear down only what is actually up: ->deinit over already-released
++	 * resources would double-decrement the PHY and the clocks (see the
++	 * unwind comment in qcom_pcie_phy_power_on()).
++	 */
++	if (!pcie->relink_hw_off) {
++		/*
++		 * No-op on this driver - qcom's dw_pcie_ops has no .stop_link -
++		 * but correct for any variant that grows one. PERST# below is
++		 * what actually brings the link down.
++		 */
++		dw_pcie_stop_link(pci);
++		if (pp->ops->deinit)
++			pp->ops->deinit(pp);
++		pcie->relink_hw_off = true;
++	}
++
++	/*
++	 * ->deinit asserted PERST#, and qcom_ep_reset_deassert() adds another
++	 * PCIE_T_PVPERL_MS before releasing it, so the total assertion is at
++	 * least twice this. The wait here is deliberate extra margin for an
++	 * endpoint that needs convincing to restart, not the T_PVPERL minimum.
++	 */
++	msleep(QCOM_PCIE_RELINK_PERST_MS);
++
++	if (pp->ops->init) {
++		ret = pp->ops->init(pp);
++		if (ret) {
++			/*
++			 * qcom_pcie_host_init() unwinds its own partial state,
++			 * so the hardware is off and must not be deinitialised
++			 * a second time.
++			 */
++			dev_err(pci->dev, "relink: host init failed: %d\n", ret);
++			return ret;
++		}
++	}
++
++	pcie->relink_hw_off = false;
++
++	/*
++	 * The GCC block reset in ->init wiped the DWC core registers, so the
++	 * root complex configuration and the outbound iATU windows have to be
++	 * reprogrammed before any config access is attempted.
++	 */
++	ret = dw_pcie_setup_rc(pp);
++	if (ret) {
++		dev_err(pci->dev, "relink: setup_rc failed: %d\n", ret);
++		goto err_deinit;
++	}
++
++	ret = dw_pcie_start_link(pci);
++	if (ret) {
++		dev_err(pci->dev, "relink: start_link failed: %d\n", ret);
++		goto err_deinit;
++	}
++
++	/*
++	 * Poll locally instead of dw_pcie_wait_for_link(): its bound is under a
++	 * second, which is fine for a cold boot but not for an endpoint that
++	 * reboots its own firmware first. Measure elapsed time rather than
++	 * counting sleeps, which only ever under-counts.
++	 */
++	started = jiffies;
++	deadline = started + msecs_to_jiffies(timeout_ms);
++	while (!dw_pcie_link_up(pci)) {
++		if (time_after(jiffies, deadline)) {
++			dev_err(pci->dev, "relink: no link after %u ms\n",
++				timeout_ms);
++			ret = -ETIMEDOUT;
++			goto err_stop_link;
++		}
++		msleep(QCOM_PCIE_RELINK_POLL_MS);
++	}
++
++	if (pp->ops->post_init)
++		pp->ops->post_init(pp);
++
++	dev_info(pci->dev, "relink: link up after %u ms\n",
++		 jiffies_to_msecs(jiffies - started));
++
++	return 0;
++
++err_stop_link:
++	dw_pcie_stop_link(pci);
++err_deinit:
++	if (pp->ops->deinit)
++		pp->ops->deinit(pp);
++	pcie->relink_hw_off = true;
++
++	return ret;
++}
++
++static int qcom_pcie_link_recover(struct pci_host_bridge *bridge,
++				  unsigned int timeout_ms)
++{
++	struct qcom_pcie *pcie = dev_get_drvdata(bridge->dev.parent);
++	int ret;
++
++	if (!pcie)
++		return -ENODEV;
++
++	if (pcie->cfg != &cfg_2_9_0_ipq5018)
++		return -EOPNOTSUPP;
++
++	/*
++	 * Clamp rather than reject: the caller has already stopped using the
++	 * endpoint by the time it gets here, so failing on an argument would
++	 * leave the device down for no reason at all.
++	 */
++	if (!timeout_ms)
++		timeout_ms = QCOM_PCIE_RELINK_TIMEOUT_MS;
++	timeout_ms = min(timeout_ms, (unsigned int)QCOM_PCIE_RELINK_TIMEOUT_MAX);
++
++	mutex_lock(&qcom_pcie_relink_mutex);
++	ret = qcom_pcie_relink(pcie, timeout_ms);
++	mutex_unlock(&qcom_pcie_relink_mutex);
++
++	return ret;
++}
++
+ static int qcom_pcie_probe(struct platform_device *pdev)
+ {
+ 	const struct qcom_pcie_cfg *pcie_cfg;
+@@ -1970,6 +2136,14 @@
+ 		goto err_phy_exit;
+ 	}
+ 
++	/*
++	 * Offer host-driven link recovery to whatever ends up bound downstream.
++	 * Installed here because dw_pcie_host_init() is what allocates
++	 * pp->bridge; unlike the native_aer/native_pme suppression in
++	 * qcom_pcie_host_init(), nothing reads this during pci_host_probe().
++	 */
++	pp->bridge->link_recover = qcom_pcie_link_recover;
++
+ 	qcom_pcie_icc_opp_update(pcie);
+ 
+ 	if (pcie->mhi)
+--- a/drivers/bus/mhi/host/pci_generic.c
++++ b/drivers/bus/mhi/host/pci_generic.c
+@@ -13,7 +13,9 @@
+ #include <linux/mhi.h>
+ #include <linux/module.h>
+ #include <linux/pci.h>
++#include <linux/mutex.h>
+ #include <linux/pm_runtime.h>
++#include <linux/string.h>
+ #include <linux/timer.h>
+ #include <linux/workqueue.h>
+ 
+@@ -1024,6 +1026,13 @@
+ enum mhi_pci_device_status {
+ 	MHI_PCI_DEV_STARTED,
+ 	MHI_PCI_DEV_SUSPENDED,
++	/*
++	 * Host-driven link recovery in progress: the link is presumed dead and
++	 * nothing may touch the device until it is cleared. Runtime PM is
++	 * disabled for as long as it is set. Only ever changed under
++	 * recovery_mutex.
++	 */
++	MHI_PCI_DEV_QUIESCED,
+ };
+ 
+ struct mhi_pci_device {
+@@ -1031,6 +1040,8 @@
+ 	struct pci_saved_state *pci_state;
+ 	struct work_struct recovery_work;
+ 	struct timer_list health_check_timer;
++	/* Serialises the whole of link_recovery_store() against itself. */
++	struct mutex recovery_mutex;
+ 	unsigned long status;
+ 	bool reset_on_remove;
+ };
+@@ -1198,6 +1209,9 @@
+ 	struct pci_dev *pdev = to_pci_dev(mhi_cntrl->cntrl_dev);
+ 	int err;
+ 
++	if (test_bit(MHI_PCI_DEV_QUIESCED, &mhi_pdev->status))
++		return;
++
+ 	dev_warn(&pdev->dev, "device recovery started\n");
+ 
+ 	if (!pdev->is_virtfn)
+@@ -1243,6 +1257,249 @@
+ 		dev_err(&pdev->dev, "Recovery failed: %d\n", err);
+ }
+ 
++/*
++ * The host-driven link recovery below cycles the whole link, so every device
++ * under the bridge is reset whether or not its driver was told. Refuse unless
++ * this endpoint is demonstrably the only thing down there: it hangs directly
++ * off the host's single root port, has no siblings, and nothing is enumerated
++ * below it. The topology is static on the hardware this was written for; this
++ * is a guard against being used somewhere it does not belong, not a claim to
++ * be race-free against concurrent enumeration or removal.
++ */
++static bool mhi_pci_sole_device_on_host(struct pci_dev *pdev,
++					struct pci_host_bridge *bridge)
++{
++	struct pci_dev *rp = pdev->bus->self;
++	struct pci_dev *dev;
++	unsigned int n;
++
++	if (!rp || rp->bus != bridge->bus)
++		return false;
++
++	if (!list_empty(&pdev->bus->children))
++		return false;
++
++	n = 0;
++	list_for_each_entry(dev, &pdev->bus->devices, bus_list)
++		n++;
++	if (n != 1)
++		return false;
++
++	n = 0;
++	list_for_each_entry(dev, &bridge->bus->devices, bus_list)
++		n++;
++
++	return n == 1;
++}
++
++/*
++ * Recovery for an endpoint that has dropped the PCIe link.
++ *
++ * mhi_pci_recovery_work() cannot handle that case: it goes from
++ * mhi_power_down() straight to pci_restore_state() and mhi_pci_is_alive(),
++ * which only works while the endpoint is still reachable. Once the link is
++ * gone, only the host controller can bring it back, and on some SoCs the
++ * endpoint must not be touched meanwhile - on IPQ5018 a CPU access to a downed
++ * link never completes, so a stray register read is not an error but a hang,
++ * and on a board with a short external watchdog that hang is a silent reboot.
++ *
++ * This is one operation rather than separate quiesce/relink/restore triggers,
++ * so no caller can run the phases out of order, and recovery_mutex is held
++ * across ALL of it - including the runtime-PM manipulation and the teardown.
++ * Publishing a "someone is recovering" flag before taking the lock would let a
++ * second writer see the flag, skip the teardown as though it had already
++ * happened, and reset the host underneath a still-running MHI stack.
++ *
++ * Runtime PM is excluded with __pm_runtime_disable() rather than a usage
++ * reference or a flag tested inside the driver's callbacks. A usage reference
++ * only prevents idle suspension, and checking inside the callbacks excludes the
++ * wrong layer: pci_pm_runtime_resume() restores config space via
++ * pci_pm_default_resume_early() before the driver callback is reached at all.
++ *
++ * It is called with check_resume = false, NOT via the pm_runtime_disable()
++ * wrapper: that wrapper passes true, which deliberately carries out a pending
++ * resume request first, and on a PCI device that means restoring endpoint
++ * configuration across the very link this operation exists because it cannot be
++ * touched. The barrier that waits out an already-running transition is kept
++ * either way; what is given up is only the courtesy resume. Cancelling a pending
++ * resume does not strand the PM core - __pm_runtime_barrier() clears the request
++ * and drains the work - but it does mean the I/O that asked for it is never
++ * served, which is acceptable only because this operation tears MHI down and
++ * rebuilds it anyway. pm_runtime_enable() does not replay it either, so after
++ * the -EBUSY path the device can stay suspended until something asks again.
++ *
++ * One entry state is NOT supported: another owner concurrently disabling
++ * runtime PM. __pm_runtime_disable() returns early when disable_depth is
++ * already nonzero, without running a barrier of its own, and that depth does
++ * not distinguish "already drained" from "someone else is mid-drain, having
++ * dropped power.lock to wait". A PCI-core transition can then still be
++ * executing outside the MHI callback, where MHI_PCI_DEV_SUSPENDED does not see
++ * it. A completed, serialized disable is fine; a concurrent one is not, and
++ * nothing here detects the difference.
++ *
++ * Draining the device's own machinery, in this order, is what makes the quiesce
++ * quiet:
++ *   - MHI_PCI_DEV_QUIESCED, so health_check() stops queueing recovery and
++ *     mhi_pci_recovery_work() returns without touching anything;
++ *   - cancel_work_sync(), then the timer, then cancel_work_sync() again: the
++ *     timer can queue the worker between the first cancellation and its own
++ *     deletion, and that worker would otherwise still be pending when the bit
++ *     is cleared and run a stale recovery against the restored device;
++ *   - mhi_power_down(graceful=false), which forces MHI_PM_LD_ERR_FATAL_DETECT.
++ *     MHI_REG_ACCESS_VALID() excludes it, so the MHI core issues no register
++ *     access from then on.
++ *
++ * None of this can un-start an access already in progress: cancellation waits
++ * for a worker past its own check, and a suspend already inside the endpoint
++ * when this begins has already touched it.
++ *
++ * A device that is already runtime-suspended is rejected rather than handled:
++ * reconciling that power state would mean resuming the endpoint first, over the
++ * link this exists to avoid using. It is re-checked after the barrier, because
++ * a suspend in flight when this started may have completed in the meantime.
++ *
++ * On failure the device is left quiesced with runtime PM still disabled, so the
++ * write can simply be retried; nothing touches the endpoint until one attempt
++ * succeeds.
++ */
++static ssize_t link_recovery_store(struct device *dev,
++				   struct device_attribute *attr,
++				   const char *buf, size_t count)
++{
++	struct pci_dev *pdev = to_pci_dev(dev);
++	struct mhi_pci_device *mhi_pdev = pci_get_drvdata(pdev);
++	struct mhi_controller *mhi_cntrl;
++	struct pci_host_bridge *bridge;
++	unsigned int timeout_ms = 0;
++	u32 id, expect;
++	int err;
++
++	if (!mhi_pdev)
++		return -ENODEV;
++	if (pdev->is_virtfn)
++		return -EOPNOTSUPP;
++
++	/* Parse before anything is touched. kstrtouint() rejects trailing junk. */
++	if (!sysfs_streq(buf, "recover")) {
++		if (strncmp(buf, "recover ", 8))
++			return -EINVAL;
++
++		err = kstrtouint(skip_spaces(buf + 8), 0, &timeout_ms);
++		if (err)
++			return err;
++	}
++
++	mhi_cntrl = &mhi_pdev->mhi_cntrl;
++
++	bridge = pci_find_host_bridge(pdev->bus);
++	if (!bridge || !bridge->link_recover)
++		return -EOPNOTSUPP;
++
++	if (!mhi_pci_sole_device_on_host(pdev, bridge)) {
++		dev_err(&pdev->dev,
++			"refusing link recovery: not the only device on this host\n");
++		return -EOPNOTSUPP;
++	}
++
++	guard(mutex)(&mhi_pdev->recovery_mutex);
++
++	if (test_bit(MHI_PCI_DEV_SUSPENDED, &mhi_pdev->status))
++		return -EBUSY;
++
++	/* Phase 1: stop using the endpoint, and make sure nothing else does. */
++	if (!test_bit(MHI_PCI_DEV_QUIESCED, &mhi_pdev->status)) {
++		__pm_runtime_disable(&pdev->dev, false);
++
++		if (test_bit(MHI_PCI_DEV_SUSPENDED, &mhi_pdev->status)) {
++			pm_runtime_enable(&pdev->dev);
++			return -EBUSY;
++		}
++
++		set_bit(MHI_PCI_DEV_QUIESCED, &mhi_pdev->status);
++
++		cancel_work_sync(&mhi_pdev->recovery_work);
++		timer_delete_sync(&mhi_pdev->health_check_timer);
++		cancel_work_sync(&mhi_pdev->recovery_work);
++
++		if (test_and_clear_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status)) {
++			mhi_power_down(mhi_cntrl, false);
++			mhi_unprepare_after_power_down(mhi_cntrl);
++		}
++
++		dev_info(&pdev->dev, "quiesced for link recovery\n");
++	}
++
++	/* Phase 2: let the host controller cycle the link. */
++	err = bridge->link_recover(bridge, timeout_ms);
++	if (err) {
++		dev_err(&pdev->dev, "host link recovery failed: %d\n", err);
++		return err;
++	}
++
++	/*
++	 * Phase 3: the host reports the link up and the controller powered, so
++	 * the endpoint can be addressed again. Check it is still the same
++	 * device before writing the saved configuration into it: a modem that
++	 * came back in a different mode would get another device's BARs, and
++	 * every MHI access after that would target the wrong register layout.
++	 * Matching IDs do not prove an unchanged BAR or capability layout, and
++	 * nothing here guarantees the link stays up for the next access.
++	 */
++	expect = (u32)pdev->vendor | ((u32)pdev->device << 16);
++	err = pci_read_config_dword(pdev, PCI_VENDOR_ID, &id);
++	if (err)
++		return pcibios_err_to_errno(err);
++
++	if (id != expect) {
++		dev_err(&pdev->dev,
++			"endpoint came back as %04x:%04x, expected %04x:%04x\n",
++			id & 0xffff, id >> 16, pdev->vendor, pdev->device);
++		return -ENODEV;
++	}
++
++	err = pci_set_power_state(pdev, PCI_D0);
++	if (err)
++		return err;
++
++	err = pci_load_saved_state(pdev, mhi_pdev->pci_state);
++	if (err)
++		return err;
++
++	pci_restore_state(pdev);
++
++	if (!mhi_pci_is_alive(mhi_cntrl)) {
++		dev_err(&pdev->dev, "not alive after link recovery\n");
++		return -ENODEV;
++	}
++
++	err = mhi_prepare_for_power_up(mhi_cntrl);
++	if (err)
++		return err;
++
++	err = mhi_sync_power_up(mhi_cntrl);
++	if (err) {
++		mhi_unprepare_after_power_down(mhi_cntrl);
++		return err;
++	}
++
++	set_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status);
++	clear_bit(MHI_PCI_DEV_QUIESCED, &mhi_pdev->status);
++	pm_runtime_enable(&pdev->dev);
++	mod_timer(&mhi_pdev->health_check_timer,
++		  jiffies + HEALTH_CHECK_PERIOD);
++
++	dev_info(&pdev->dev, "link recovery complete\n");
++
++	return count;
++}
++static DEVICE_ATTR_WO(link_recovery);
++
++static struct attribute *mhi_pci_dev_attrs[] = {
++	&dev_attr_link_recovery.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(mhi_pci_dev);
++
+ static void health_check(struct timer_list *t)
+ {
+ 	struct mhi_pci_device *mhi_pdev = timer_container_of(mhi_pdev, t,
+@@ -1250,7 +1507,8 @@
+ 	struct mhi_controller *mhi_cntrl = &mhi_pdev->mhi_cntrl;
+ 
+ 	if (!test_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status) ||
+-			test_bit(MHI_PCI_DEV_SUSPENDED, &mhi_pdev->status))
++			test_bit(MHI_PCI_DEV_SUSPENDED, &mhi_pdev->status) ||
++			test_bit(MHI_PCI_DEV_QUIESCED, &mhi_pdev->status))
+ 		return;
+ 
+ 	if (!mhi_pci_is_alive(mhi_cntrl)) {
+@@ -1313,6 +1571,7 @@
+ 	if (!mhi_pdev)
+ 		return -ENOMEM;
+ 
++	mutex_init(&mhi_pdev->recovery_mutex);
+ 	INIT_WORK(&mhi_pdev->recovery_work, mhi_pci_recovery_work);
+ 
+ 	if (pdev->is_virtfn && info->vf_config)
+@@ -1704,6 +1963,7 @@
+ 	.remove		= mhi_pci_remove,
+ 	.shutdown	= mhi_pci_shutdown,
+ 	.err_handler	= &mhi_pci_err_handler,
++	.dev_groups	= mhi_pci_dev_groups,
+ 	.driver.pm	= &mhi_pci_pm_ops,
+ 	.sriov_configure = pci_sriov_configure_simple,
+ };
