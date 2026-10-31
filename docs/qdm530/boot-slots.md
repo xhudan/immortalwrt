@@ -45,7 +45,16 @@ the flag byte.
 
 ```sh
 bootslot switch     # refuses unless the other slot holds a valid UBI image
-reboot              # boots the other slot
+```
+
+**Then check before rebooting — do not paste the two as one block.** `bootslot switch` can
+fail *after* writing one copy, and in that case it prints `Do NOT reboot`. A pasted block
+would reboot anyway, which is the one thing that must not happen:
+
+```sh
+bootslot switch && bootslot status      # status must report the copies agreeing
+# only then, as a separate command:
+reboot
 ```
 
 `bootslot switch` only rewrites `BOOTCONFIG`; nothing changes until you `reboot`.

@@ -83,8 +83,10 @@ log "ubiformat /dev/mtd$inact  (erases the whole inactive partition, purging any
 ubidetach -p "/dev/mtd$inact" 2>/dev/null
 ubiformat "/dev/mtd$inact" -f "$IMG" -y || die "ubiformat failed"
 
-log "sanity-checking the staged slot (read-only)..."
-ubidetach -d 9 2>/dev/null
+# NOT read-only: attaching UBI is a side effect, and an existing ubi9 belongs to someone
+# else - detaching it because it merely exists would pull the rug out from under them.
+log "sanity-checking the staged slot (attaches UBI on device 9)..."
+[ -d /sys/class/ubi/ubi9 ] && die "ubi9 is already attached - refusing to use it as scratch"
 ubiattach -m "$inact" -d 9 >/dev/null 2>&1 || die "ubiattach failed on mtd$inact"
 vols=$(ubinfo -a -d 9 2>/dev/null | sed -n 's/^Name:[[:space:]]*//p' | tr '\n' ' ')
 # verify the first 4 bytes via md5sum (busybox has md5sum; `od`/`hexdump` may be absent):
@@ -120,11 +122,31 @@ read ans
 [ "$ans" = "YES" ] || die "aborted by user — nothing flipped (image is staged on mtd$inact)."
 
 log "writing primaryboot=$new via the kernel's BOOTCONFIG serializer (never hand-edited)"
-echo "$new" > /proc/boot_info/rootfs/primaryboot
-cat /proc/boot_info/getbinary_bootconfig  > /tmp/bc0.bin
-cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin
+echo "$new" > /proc/boot_info/rootfs/primaryboot \
+	|| die "writing primaryboot failed - nothing flipped"
+cat /proc/boot_info/getbinary_bootconfig  > /tmp/bc0.bin \
+	|| die "reading getbinary_bootconfig failed - nothing flipped"
+cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin \
+	|| die "reading getbinary_bootconfig1 failed - nothing flipped"
+# A serializer emitting a valid struct says nothing about whether the read was complete.
+[ -s /tmp/bc0.bin ] && [ -s /tmp/bc1.bin ] || die "serialized BOOTCONFIG is empty - nothing flipped"
+
+# Verify each write over the WHOLE record, not by its magic. Two partitions cannot be
+# written atomically from here: if the second fails, the copies disagree, and the only
+# honest thing to do is say so and refuse to reboot.
+verify_bc(){ [ "$(md5sum < "$1" | cut -d' ' -f1)" = \
+	"$(dd if="$2" bs=1 count=$(wc -c < "$1") 2>/dev/null | md5sum | cut -d' ' -f1)" ]; }
+
 mtd write /tmp/bc0.bin "/dev/mtd$bc0_mtd" || die "mtd write BOOTCONFIG failed"
-mtd write /tmp/bc1.bin "/dev/mtd$bc1_mtd" || die "mtd write BOOTCONFIG1 failed"
+verify_bc /tmp/bc0.bin "/dev/mtd$bc0_mtd" \
+	|| die "BOOTCONFIG read-back differs from what was written - do NOT reboot"
+mtd write /tmp/bc1.bin "/dev/mtd$bc1_mtd" || {
+	echo "slot-install: BOOTCONFIG1 write failed - the two copies now disagree." >&2
+	echo "slot-install: do NOT reboot; see docs/qdm530/restore-bootconfig.md." >&2
+	exit 1
+}
+verify_bc /tmp/bc1.bin "/dev/mtd$bc1_mtd" \
+	|| die "BOOTCONFIG1 read-back differs from what was written - do NOT reboot"
 
 # Keep the slot you are leaving as a usable dormant backup. The vendor firmware sets the
 # U-Boot env flag sys_upgrade=1 on every boot; on the next boot the bootloader's
@@ -133,9 +155,15 @@ mtd write /tmp/bc1.bin "/dev/mtd$bc1_mtd" || die "mtd write BOOTCONFIG1 failed"
 # real dual-boot. HW-verified on this board. (sys_upgrade/sys_recovery live in 0:appsblenv,
 # not the rootfs slots.)
 if command -v fw_setenv >/dev/null 2>&1; then
-	fw_setenv sys_upgrade 0 2>/dev/null
-	fw_setenv sys_recovery 0 2>/dev/null
-	log "cleared sys_upgrade/sys_recovery env (keep the other slot as a backup)"
+	# Checked, because "preserves the vendor backup" is a promise this makes to the
+	# operator - and an unchecked fw_setenv turns it into a guess.
+	if fw_setenv sys_upgrade 0 && fw_setenv sys_recovery 0; then
+		log "cleared sys_upgrade/sys_recovery env (keep the other slot as a backup)"
+	else
+		log "WARNING: clearing sys_upgrade/sys_recovery FAILED - the bootloader's"
+		log "WARNING: auto-sync may overwrite the slot you are leaving. The flip itself"
+		log "WARNING: is already written; decide whether to continue before rebooting."
+	fi
 else
 	log "WARNING: fw_setenv not found — the inactive slot may be overwritten by the bootloader auto-sync"
 fi

@@ -77,7 +77,8 @@ ubiformat "/dev/mtd$inact" -f "$IMG" -y || die "ubiformat failed"
 
 # ---- verify it really is the vendor firmware (by UBI volume names) ----
 log "verifying the written slot holds vendor volumes..."
-ubidetach -d 9 2>/dev/null
+# An existing ubi9 belongs to someone else; refuse rather than detach it blind.
+[ -d /sys/class/ubi/ubi9 ] && die "ubi9 is already attached - refusing to use it as scratch"
 ubiattach -m "$inact" -d 9 >/dev/null 2>&1 || die "ubiattach failed on mtd$inact — written image is not a valid UBI"
 vols=$(ubinfo -a -d 9 2>/dev/null | sed -n 's/^Name:[[:space:]]*//p' | tr '\n' ' ')
 ubidetach -d 9 2>/dev/null

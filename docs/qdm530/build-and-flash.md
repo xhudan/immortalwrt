@@ -90,10 +90,15 @@ flash goes wrong the serial console gets you back into U-Boot.
 
 ### 4b. Non-UART from the vendor root shell — advanced, NO recovery net
 If you have root SSH on the vendor firmware and no serial cable, install by writing the
-**inactive** slot and flipping the boot pointer. The running (active) slot is never touched,
-so every step except the final flip is reversible. **The flip has no recovery net without
-UART — if the new slot fails to boot, only serial can recover it.** (HW-verified on a twin
-unit, Oct 2026.)
+**inactive** slot and flipping the boot pointer. The running (active) slot is never touched.
+
+**"Reversible" needs qualifying, and an earlier version of this line did not.** The active
+slot surviving means you can still boot what you are running — it does not mean the steps
+undo themselves. `ubiformat` on the inactive slot **destroys whatever was there**, which on a
+dual-boot install is the vendor firmware; getting it back needs a backup you took beforehand
+(`restore-vendor.md`), and restoring that raw dump is itself untested. **The flip has no
+recovery net without UART — if the new slot fails to boot, only serial can recover it.**
+(HW-verified on a twin unit, Oct 2026.)
 
 1. **Find the inactive slot — do NOT assume slot A/B or a fixed mtd.** `/proc/boot_info`'s
    `upgradepartition` names the inactive slot directly (QSDK's own value, so it is correct
@@ -127,22 +132,42 @@ unit, Oct 2026.)
    ubidetach -d 9
    ```
 4. Flip the boot pointer to the staged slot with the kernel's own serializer — **never
-   hand-edit the struct**. `getbinary_bootconfig` always emits a valid struct, so a wrong
-   flag at worst keeps booting the current slot; it cannot corrupt BOOTCONFIG:
+   hand-edit the struct**.
+
+   An earlier version of this step claimed `getbinary_bootconfig` always emits a valid struct
+   so "a wrong flag at worst keeps booting the current slot; it cannot corrupt BOOTCONFIG".
+   **That was wrong and is the most dangerous sentence this document ever carried.** A
+   serializer that emits a valid struct guarantees nothing about whether the read succeeded,
+   whether the transfer was complete, whether either flash write landed, or whether the slot
+   it selects can boot. Two partitions also cannot be written atomically: a failure or a power
+   loss between them leaves the copies disagreeing and the bootloader choosing from
+   inconsistent data.
+
+   So every step is checked, and `reboot` is deliberately **not** part of the block:
    ```sh
-   echo "$newflag" > /proc/boot_info/rootfs/primaryboot   # RAM only until the mtd write
+   set -e                                                  # stop at the first failure
+   echo "$newflag" > /proc/boot_info/rootfs/primaryboot    # RAM only until the mtd write
    cat /proc/boot_info/getbinary_bootconfig  > /tmp/bc0.bin
    cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin
+   [ -s /tmp/bc0.bin ] && [ -s /tmp/bc1.bin ]              # a short read is a failure
    mtd write /tmp/bc0.bin /dev/mtd2                        # BOOTCONFIG
    mtd write /tmp/bc1.bin /dev/mtd3                        # BOOTCONFIG1 (backup)
    fw_setenv sys_upgrade 0     # keep vendor as a dual-boot backup (see note below);
    fw_setenv sys_recovery 0    # omit both lines to mirror ImmortalWrt into both slots
-   reboot
    ```
-   Optional read-back before rebooting: `dd if=/dev/mtd2 bs=4 count=1 | hexdump -C` → magic
-   `a0 a1 a2 a3`. After reboot ImmortalWrt comes up on `192.168.1.1` (new SSH host key). If it
-   answers on **neither** the new nor the old IP after ~3 min, the staged slot failed to boot
-   → UART/TFTP recovery is required.
+
+   **Mandatory read-back, not optional.** Compare the whole record, not the 4-byte magic —
+   matching magic says only that something structured is there:
+   ```sh
+   md5sum /tmp/bc0.bin; dd if=/dev/mtd2 bs=336 count=1 2>/dev/null | md5sum
+   md5sum /tmp/bc1.bin; dd if=/dev/mtd3 bs=336 count=1 2>/dev/null | md5sum
+   ```
+   Both pairs must match. If either does not, **do not reboot** — the slot pointer is in an
+   unknown state and `restore-bootconfig.md` is the way out, from the console you still have.
+
+   Only when both match, as a separate command: `reboot`. After it ImmortalWrt comes up on
+   `192.168.1.1` (new SSH host key). If it answers on **neither** the new nor the old IP after
+   ~3 min, the staged slot failed to boot → UART/TFTP recovery is required.
 
    > **What happens to the old vendor slot.** The vendor firmware sets the U-Boot env flag
    > `sys_upgrade=1` on every boot; on the first boot after this flip the bootloader's

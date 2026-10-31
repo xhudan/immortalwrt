@@ -34,6 +34,14 @@ MD5=$(md5sum "$IMG" | cut -d' ' -f1)
 echo ">> local image: $IMG"
 echo ">> local md5  : $MD5"
 
+# An unrecognised mode must NOT fall through to the full install - that is the one path
+# that formats a slot and flips the boot pointer, and a typo is not consent.
+case "${RMODE:-}" in
+	detect|stage|"") ;;
+	*) echo "slot-install-push: unknown mode '$RMODE' (want: detect | stage | empty)" >&2
+	   exit 1 ;;
+esac
+
 # detect mode never transfers the image
 if [ "$RMODE" = detect ]; then
 	echo ">> transferring installer..."
