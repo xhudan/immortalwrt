@@ -177,8 +177,19 @@ Key in-tree pieces:
 - `target/linux/qualcommax/ipq50xx/base-files/usr/sbin/bootslot` (A/B slot switch from
   ImmortalWrt — see `boot-slots.md`)
 - `package/kernel/leds-aw9523/` (AW9523B constant-current LED driver, `kmod-leds-aw9523`)
-- `target/linux/qualcommax/patches-6.18/0955–0957` (SPI-NAND ECC context, UNIPHY
-  refclk, GMAC1 rate-matching)
+- `target/linux/qualcommax/patches-6.18/0955–0966` — twelve local kernel patches:
+  - `0955` + `0965` SPI-NAND ECC context — **not ours**, a backport of upstream
+    `f94c9b68bb5f` + `8d6911645478`; drop both once the kernel here carries them
+  - `0956` UNIPHY refclk (a workaround; no native consumer exists for a per-PHY clock
+    before PHY discovery), `0957` GMAC1 2500BASEX-only on a DT-pinned port
+  - `0958` + `0959` the sustained-DL stall (`downlink-stall.md`), `0966` the refill
+    gate and work drain that the in-line refill made necessary
+  - `0960` the modem's DUN/AT channel (`modem-modes.md`)
+  - `0961` a `qcom-pcie` PHY refcount underflow on the error unwind (upstream candidate),
+    `0962` per-host AER/PME suppression (`aer-hang.md`, not yet validated),
+    `0963` the host-side link-recovery hook (**an experiment, never run**)
+  - `0964` tsens `__init`-after-free (upstream candidate; `&tsens` stays disabled
+    because the crash fix does not answer the calibration question)
 - `package/firmware/ipq-wifi-qdm530/` (board data for `ath11k`)
 
 ## References

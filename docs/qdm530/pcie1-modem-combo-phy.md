@@ -69,12 +69,14 @@ appear and may need a power-cycle to leave PBL — not the case for this board.
   (`phy-qcom-uniphy-usb-ss-22ull.c`) calls `qcom_uniphy_usb_mux_select(uniphy, true)`
   on probe → mux = USB → the `pcie1` PHY block reads all-zero and the modem cannot
   train.
-- The USB2 (HS) PHY (`0x5b000`) is a separate block, but it is **not** a usable
-  fallback on its own: mainline `dwc3` refuses to register its core without the
-  SuperSpeed PHY (`dwc3-qcom: failed to register DWC3 Core`; dropping `usb3-phy`
-  from the dwc3 `phys` list only makes xhci fail `can't setup: -110`). So once the
-  combo PHY is given to `pcie1`, the whole USB controller is dead — there is **no
-  USB2-only mode**.
+- The USB2 (HS) PHY (`0x5b000`) is a separate block, but it did not serve as a
+  fallback here. With the combo PHY given to `pcie1`, `dwc3` as configured on this
+  board did not come up (`dwc3-qcom: failed to register DWC3 Core`; dropping
+  `usb3-phy` from the dwc3 `phys` list only moved the failure to xhci,
+  `can't setup: -110`). No USB2-only configuration was attempted beyond that, so
+  whether one is possible on this SoC is **untested rather than ruled out** — the
+  earlier wording here claimed mainline `dwc3` universally cannot register without a
+  SuperSpeed PHY, which is more than was established.
 
 The current config keeps `usbphy1` (USB3) **disabled** so the combo PHY belongs to
 `pcie1` and the modem trains; and because that leaves dwc3 unable to register, the

@@ -75,12 +75,13 @@ The dedicated HW DL event ring (2048) already satisfies "event ≥ 2× channel".
 
 **`0959-net-mhi_net-direct-inline-rx-refill.patch`** — refill the DL ring **in-line**
 from `mhi_net_dl_callback()`: for each buffer the device just consumed, hand one back
-immediately (`netdev_alloc_skb()` + `mhi_queue_skb()`), so the ring never runs dry.
-The `delayed_work` is kept only as the fallback for a real allocation/queue failure
-(memory pressure) — exactly what the vendor driver does. This is the standard Linux
-NIC RX pattern (stmmac, igb, virtio_net, ath11k …): refill from the receive path, not
-a workqueue. Benefits vs the workqueue: zero context switches, cache-hot, and the ring
-stays ~100 % full regardless of CPU load.
+immediately (`netdev_alloc_skb()` + `mhi_queue_skb()`), so the ring is replenished at
+the rate it is drained rather than whenever a worker next runs. The `delayed_work` is
+kept as the fallback for a real allocation/queue failure (memory pressure) — what the
+vendor driver does. Refilling from the receive path rather than a workqueue is a
+common pattern among Linux NIC drivers, though not a universal one; drivers use
+several refill designs, and the argument here rests on this device's behaviour rather
+than on convention.
 
 **Why in-line refill is safe here:** the MHI host drops `mhi_chan->lock` around the
 transfer callback — in `drivers/bus/mhi/host/main.c:parse_xfer_event()` the DL path is
@@ -89,8 +90,30 @@ the callback runs in softirq/bh context. So `mhi_queue_skb()` (which takes the p
 locks itself) can be called directly from the callback without deadlock. Verified in
 the 6.18.54 source.
 
-Ring size alone narrows the window; the in-line refill closes it (1-in-1-out keeps the
-ring full even if the CPU is saturated). Both together are belt-and-braces.
+Ring size alone narrows the window; the in-line refill narrows it much further, but
+does **not** close it: an allocation failure still falls back to the work, and a device
+can still outrun the host. Both together are belt-and-braces, not a guarantee.
+
+**One more patch belongs to this story.**
+`0966-net-mhi_net-no-refill-once-device-is-down.patch` closes a hole the in-line refill
+opened. `mhi_ndo_stop()` cancels the refill work, but a DL completion arriving after
+that cancellation can re-arm it — and with the in-line path it can also queue a buffer
+directly. The buffer is harmless: `mhi_gen_tre()` checks
+`ch_state == MHI_CH_STATE_ENABLED` and publishes under `mhi_chan->lock`, while
+`mhi_unprepare_channel()` takes the same lock to set `MHI_CH_STATE_DISABLED` before
+`mhi_reset_chan()` reclaims what is queued — so a published buffer is always reclaimed
+with `-ENOTCONN` and a refused one is freed. The **work item** is not harmless: if that
+completion fails to allocate or queue, it schedules `rx_refill`, and
+`mhi_net_dellink()` then calls `free_netdev()` with the work pending, while
+`mhi_net_rx_refill_work()` reaches `ndev` and `mdev` through the netdev private area.
+That is a use-after-free. The patch gates both refill paths on `netif_running()` and
+drains the work again in `dellink()` after `mhi_unprepare_from_transfer()`.
+
+It narrows rather than closes: nothing in `mhi_unprepare_channel()` waits for a
+callback that is already executing, and MHI exposes no callback-quiesce point to drain
+after. Only the allocation/queue failure branch reaches the dangerous path, so no
+ordinary refill test exercises it — validating it wants fault injection on that branch
+concurrent with close and removal, which has not been done.
 
 ## Verification
 

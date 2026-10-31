@@ -33,6 +33,23 @@ pci=noaer pcie_ports=compat
   config space on an error and can hang in exactly the same way. Compat mode keeps
   every port service out of the way, not just AER.
 
+**A scoped replacement now exists in the tree, unvalidated.**
+`0962-PCI-qcom-do-not-claim-aer-and-pme-on-ipq5018.patch` clears
+`host->native_aer` and `host->native_pme` in `qcom_pcie_host_init()`, which is what
+`portdrv` consults in `get_port_device_capability()`, so the two services are never
+instantiated on this host. It has to happen there rather than after
+`dw_pcie_host_init()` returns, because that function calls `pci_host_probe()` and
+that is what creates and binds the service devices. Gated on an IPQ5018-specific cfg,
+since the other SoCs sharing `ops_2_9_0` also disable the completion timeout but have
+not been shown to behave the same way on a dead-link transaction.
+
+That is narrower than the command line, which disables AER machine-wide and puts every
+port service on every host into compat mode — but it is **not equivalent**, and the
+boot arguments stay until it is tested on hardware. `pcie_ports=native` would override
+the flags, compat suppresses more than these two, and the remaining services stay
+eligible on their own terms. None of them performs the AER source-discovery walk, but
+hotplug can enumerate and remove downstream devices, so that wants its own look.
+
 **Why not a bus reset:** a runtime SBR is not available here — the root port's
 `reset_subordinate` returns `-ENOTTY`, i.e. no bus-reset method.
 
@@ -109,11 +126,15 @@ one. `usb_repower` is a no-op on a PCIe/MHI modem for the same reason. The recov
 ladder consequently has nothing between *"reset the modem over QMI"* (which needs a
 modem that still answers) and *"reboot the board"*.
 
-### Three ways to recover the modem were tried. All three failed.
+### Three ways to recover the modem were tried on hardware. All three failed.
 
 The wedge this port keeps hitting leaves the modem unusable with no reset that
 works, so the recovery question was chased to the end. Recording the dead ends
 because each one looked right until it was tested.
+
+A fourth approach is now carried in the tree and has **never been executed** — see
+*"A fourth attempt, untested"* at the end. It is not a fix and is not presented as
+one; it is listed so that nobody reads the three failures below as the final word.
 
 **1. Re-bind the PCIe host controller from the kernel ("Fix A").**
 PERST# (GPIO 18) is the only modem control line this board has -- there is no
@@ -220,6 +241,26 @@ qualcommax) to reach a release that still does not contain the blocker.
    one source of them;
 3. only then re-evaluate the 17cb:0308 reset quirk, which may well be safe once
    post-reset MMIO is terminated rather than hanging.
+
+### A fourth attempt, untested
+
+`0963-PCI-add-a-host-bridge-link-recovery-hook.patch` adds a `->link_recover` hook to
+`struct pci_host_bridge`, implements it in `pcie-qcom` as a deinit/PERST/init/setup_rc/
+start_link cycle that touches only SoC-local resources, and drives it from
+`mhi-pci-generic` as one operation behind a single sysfs write: quiesce MHI, cycle the
+link, restore the endpoint.
+
+It exists because each earlier attempt had half of it right. The host re-bind cycled
+PERST# but left `qcom-pcie` unbound for good; the reset quirk cleared the modem's
+SYSERR but then stalled re-initialising an endpoint across a link that was not up yet.
+
+**Nothing here is established.** It builds and it survived several review rounds, but
+no recovery has ever been run on this board, and whether PERST# actually returns this
+modem from either observed wedge mode — link down after an SSR, and link up with MHI
+SYSERR latched — remains exactly as unproven as it was before the patch existed. The
+patch is the experiment, not the result, and this section is in the document only so
+the attempt is on the record rather than rediscovered. It will either move up into the
+history above as a fourth failure, or out of it as a fix, once it has been run.
 
 Until then the modem's recovery is wwand's ladder reaching its reboot rung, and
 the mitigation that matters most is not a kernel patch at all: the band-lock fix

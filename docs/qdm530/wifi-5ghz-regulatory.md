@@ -57,9 +57,14 @@ Baked into the port so a fresh flash gets it:
 - `base-files/etc/uci-defaults/25_set-wireless-country` — sets `country=CN` on every
   `wifi-device` on first boot.
 - `base-files/etc/hotplug.d/ieee80211/13-qdm530-5ghz-channel` — the QCN9074 enumerates
-  over PCIe ~20 s into boot, *after* uci-defaults have run, so its channel/width is pinned
-  here when the phy appears: **ch36 / HE160 / CN**, then a `wifi` reload brings both radios
-  up cleanly.
+  over PCIe ~20 s into boot, *after* uci-defaults have run, so its channel/width is
+  **seeded** here when the phy appears: **ch36 / HE160 / CN**, then a `wifi` reload brings
+  both radios up cleanly.
+  It seeds only what is absent. An earlier version re-asserted channel, htmode and country
+  on every event, which silently reverted anything the operator had deliberately changed —
+  a default belongs at first boot, not enforced for the life of the device. Note also that
+  a configured `band=5g` section is not proof the radio is present; it only means one was
+  detected at some point, so the reload can still be triggered by a 2.4 GHz event.
 
 (Both scripts previously forced `ID` + `HE20` — that was the 20 MHz cause.)
 
