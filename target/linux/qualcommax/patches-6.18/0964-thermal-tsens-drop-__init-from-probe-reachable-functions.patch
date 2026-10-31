@@ -1,0 +1,103 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] thermal/drivers/tsens: drop __init from functions reachable
+ from probe
+
+tsens_probe() calls priv->ops->init(priv), and every .init member in this driver
+points at a function marked __init: init_common() in tsens.c, init_8956() and
+init_tsens_v1_no_rpm() in tsens-v1.c, init_tsens_v2_no_rpm() in tsens-v2.c, and
+init_8226(), init_8909(), init_8939() and init_9607() in tsens-v0_1.c. Several of
+them call init_common(), which is annotated too.
+
+Nothing guarantees that probe runs before the init sections are freed. A deferred
+probe, or a platform where the tsens node is probed late, calls into freed text
+and oopses. On an IPQ5018 CPE this reproduces reliably: the board Oopses about
+9.4 s into boot inside init_tsens_v1_no_rpm, and the only way to get a bootable
+system was to disable the tsens node in DT - which leaves the SoC with no thermal
+sensing at all.
+
+Drop the annotation from all eight. Fixing only the entry point is not enough
+while the init_common() it calls is still annotated. The declaration of
+init_common() in tsens.h never carried __init, so it needs no change.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/drivers/thermal/qcom/tsens.c
++++ b/drivers/thermal/qcom/tsens.c
+@@ -929,7 +929,7 @@
+ 	.reg_stride	= 4,
+ };
+ 
+-int __init init_common(struct tsens_priv *priv)
++int init_common(struct tsens_priv *priv)
+ {
+ 	void __iomem *tm_base, *srot_base;
+ 	struct device *dev = priv->dev;
+--- a/drivers/thermal/qcom/tsens-v0_1.c
++++ b/drivers/thermal/qcom/tsens-v0_1.c
+@@ -207,7 +207,7 @@
+ 	return 0;
+ }
+ 
+-static int __init init_8226(struct tsens_priv *priv)
++static int init_8226(struct tsens_priv *priv)
+ {
+ 	priv->sensor[0].slope = 2901;
+ 	priv->sensor[1].slope = 2846;
+@@ -219,7 +219,7 @@
+ 	return init_common(priv);
+ }
+ 
+-static int __init init_8909(struct tsens_priv *priv)
++static int init_8909(struct tsens_priv *priv)
+ {
+ 	int i;
+ 
+@@ -240,7 +240,7 @@
+ 	return init_common(priv);
+ }
+ 
+-static int __init init_8939(struct tsens_priv *priv) {
++static int init_8939(struct tsens_priv *priv) {
+ 	priv->sensor[0].slope = 2911;
+ 	priv->sensor[1].slope = 2789;
+ 	priv->sensor[2].slope = 2906;
+@@ -255,7 +255,7 @@
+ 	return init_common(priv);
+ }
+ 
+-static int __init init_9607(struct tsens_priv *priv)
++static int init_9607(struct tsens_priv *priv)
+ {
+ 	int i;
+ 
+--- a/drivers/thermal/qcom/tsens-v1.c
++++ b/drivers/thermal/qcom/tsens-v1.c
+@@ -145,7 +145,7 @@
+ 	[TRDY] = REG_FIELD(TM_TRDY_OFF, 0, 0),
+ };
+ 
+-static int __init init_8956(struct tsens_priv *priv) {
++static int init_8956(struct tsens_priv *priv) {
+ 	priv->sensor[0].slope = 3313;
+ 	priv->sensor[1].slope = 3275;
+ 	priv->sensor[2].slope = 3320;
+@@ -161,7 +161,7 @@
+ 	return init_common(priv);
+ }
+ 
+-static int __init init_tsens_v1_no_rpm(struct tsens_priv *priv)
++static int init_tsens_v1_no_rpm(struct tsens_priv *priv)
+ {
+ 	int i, ret;
+ 	u32 mask = 0;
+--- a/drivers/thermal/qcom/tsens-v2.c
++++ b/drivers/thermal/qcom/tsens-v2.c
+@@ -220,7 +220,7 @@
+ 	return 0;
+ }
+ 
+-static int __init init_tsens_v2_no_rpm(struct tsens_priv *priv)
++static int init_tsens_v2_no_rpm(struct tsens_priv *priv)
+ {
+ 	struct device *dev = priv->dev;
+ 	int i, ret;
