@@ -19,6 +19,26 @@ netdev_alloc_skb()/mhi_queue_skb() can be called directly. The delayed work is
 kept as the fallback for the rare allocation/queue failure, as the vendor
 driver does.
 
+Error and teardown behaviour, audited rather than assumed:
+
+ - The channel teardown path cannot reach this code. mhi_reset_data_chan()
+   returns outstanding buffers with result.transaction_status = -ENOTCONN, and
+   mhi_net_dl_callback() handles -ENOTCONN by freeing the skb and returning
+   before the refill, so nothing here runs while the channel is being reset and
+   the work is never scheduled from that path.
+ - mhi_process_data_event_ring() does read_unlock_bh(&mhi_chan->lock) before
+   invoking the callback, so queueing from inside it takes no lock that is
+   already held.
+ - netdev_alloc_skb() allocates with GFP_ATOMIC, which is what softirq context
+   requires.
+ - The mhi_queue_is_full() test can race the fallback worker. That is benign:
+   mhi_queue_skb() remains the authoritative check and the newly allocated skb
+   is freed if it refuses.
+ - mhi_ndo_stop() does cancel_delayed_work_sync() on the refill work. A
+   concurrent dl_callback can still re-schedule it after that cancellation;
+   that window predates this patch, which only changes when the work is used as
+   a fallback rather than as the normal path.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/net/mhi_net.c
@@ -33,7 +53,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  
  	if (unlikely(mhi_res->transaction_status)) {
  		switch (mhi_res->transaction_status) {
-@@ -228,9 +225,25 @@
+@@ -228,9 +225,34 @@
  		__netif_rx(skb);
  	}
  
@@ -41,20 +61,29 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 -	if (free_desc_count >= mhi_netdev->rx_queue_sz / 2)
 -		schedule_delayed_work(&mhi_netdev->rx_refill, 0);
 +	/* Refill in-line: hand one buffer back for every one the device just
-+	 * consumed so the DL ring never drains. Deferring to the workqueue let
-+	 * the ring empty under sustained DL faster than the worker was
-+	 * scheduled, starving (and permanently wedging) the modem's hardware DL
-+	 * engine. The chan lock is dropped around this callback and we run in
-+	 * softirq, so these are safe here; fall back to the work only on an
-+	 * actual alloc/queue failure.
++	 * consumed, so the ring is replenished at the rate it is drained rather
++	 * than whenever a worker next gets to run. Deferring to the workqueue
++	 * let the ring empty under sustained DL faster than the worker was
++	 * scheduled, starving - and then permanently wedging - the modem's
++	 * hardware DL engine. This does not guarantee the ring never drains: an
++	 * allocation failure still falls back to the work, and the device can
++	 * still outrun the host.
++	 *
++	 * Safe here because mhi_process_data_event_ring() drops mhi_chan->lock
++	 * before invoking this callback, netdev_alloc_skb() allocates with
++	 * GFP_ATOMIC, and we run in softirq. mhi_queue_skb() - not the
++	 * queue_is_full() test above - is the authoritative check, so losing
++	 * that race against the fallback worker only costs one allocation.
 +	 */
 +	if (!mhi_queue_is_full(mhi_dev, DMA_FROM_DEVICE)) {
 +		unsigned int size = mhi_netdev->mru ? mhi_netdev->mru :
 +					READ_ONCE(mhi_netdev->ndev->mtu);
 +		struct sk_buff *nskb = netdev_alloc_skb(mhi_netdev->ndev, size);
 +
-+		if (unlikely(!nskb) ||
-+		    unlikely(mhi_queue_skb(mhi_dev, DMA_FROM_DEVICE, nskb, size, MHI_EOT))) {
++		if (unlikely(!nskb)) {
++			schedule_delayed_work(&mhi_netdev->rx_refill, 0);
++		} else if (unlikely(mhi_queue_skb(mhi_dev, DMA_FROM_DEVICE, nskb,
++						  size, MHI_EOT))) {
 +			kfree_skb(nskb);
 +			schedule_delayed_work(&mhi_netdev->rx_refill, 0);
 +		}

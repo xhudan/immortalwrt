@@ -51,6 +51,28 @@
 # flowing on the WAN, which makes "no rx" mean dead rather than idle.
 # THE ORDER MATTERS: never shorten this without that probe running, or a quiet
 # night trips the watchdog on a healthy link and climbs the ladder to a reboot.
+#
+# KNOWN WEAKNESS of this pairing, and the native alternative. The probe makes
+# "no rx" mean "dead" only when the probe itself is answered. If it goes
+# unanswered for reasons upstream of the modem -- ICMP filtered, a carrier
+# outage, a routing problem -- then rx stands still on a link whose bearer is
+# fine, and 120 s later the daemon starts climbing the ladder. The probe reduces
+# the idle/dead ambiguity; it does not remove the false positive.
+#
+# wwand's own answer to this is NOT an in-daemon probe: ddimension/wwand#13 was
+# closed having rejected one ("An ICMP probe is squarely L3: it needs a source
+# address, a route, a firewall zone, and DNS if the target is a name"), and the
+# maintainer implemented `context_failed` on the ubus interface instead
+# (src-ucode/ubus.uc, daemon.uc, with a rate limit and a unit test). The
+# intended arrangement is that something which actually understands routes and
+# reachability decides, calls context_failed, and lets the daemon run the rungs
+# it cannot reach itself -- while zero_rx_timeout stays at its conservative
+# default as a backstop rather than as the detector.
+#
+# Moving to that is a policy change for this board, not a bug fix: it trades a
+# detector that can false-positive into a reboot for one that depends on an
+# external monitor being correct and running. Left as it is deliberately, with
+# the trade-off written down.
 . /lib/functions.sh
 
 [ "$(board_name)" = "unbranded,qdm530" ] || exit 0

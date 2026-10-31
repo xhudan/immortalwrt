@@ -317,6 +317,33 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	qcom_pcie_icc_opp_update(pcie);
  
  	if (pcie->mhi)
+@@ -2027,7 +2201,16 @@
+ 	 * powerdown state. This will affect the lifetime of the storage devices
+ 	 * like NVMe.
+ 	 */
+-	if (!dw_pcie_link_up(pcie->pci)) {
++	/*
++	 * A failed link recovery has already taken the clocks and the PHY down.
++	 * Reading DBI with the clocks off, or calling ->deinit a second time
++	 * over resources it has already released, is exactly what
++	 * ->relink_hw_off exists to prevent - so only record that the
++	 * controller has to be brought back up on resume.
++	 */
++	if (pcie->relink_hw_off) {
++		pcie->suspended = true;
++	} else if (!dw_pcie_link_up(pcie->pci)) {
+ 		qcom_pcie_host_deinit(&pcie->pci->pp);
+ 		pcie->suspended = true;
+ 	}
+@@ -2072,6 +2255,8 @@
+ 			return ret;
+ 
+ 		pcie->suspended = false;
++		/* ->init powered the controller back up, whatever left it down. */
++		pcie->relink_hw_off = false;
+ 	}
+ 
+ 	qcom_pcie_icc_opp_update(pcie);
 --- a/drivers/bus/mhi/host/pci_generic.c
 +++ b/drivers/bus/mhi/host/pci_generic.c
 @@ -13,7 +13,9 @@

@@ -62,8 +62,17 @@ case "$mac" in
 	*) echo "24_generate-macaddr: refusing to set malformed '$mac'" >&2; exit 1 ;;
 esac
 
-# A silent uci failure here is the whole failure mode this script exists to
-# avoid, so check it and verify the value landed before declaring success.
+# $mac is the board's BASE address. Only one is assigned today, because only one
+# thing here needs one: both ethernet ports are bridged into br-lan (the WAN is
+# the cellular modem, whose address comes from the modem), so there is no second
+# ethernet interface to derive for.
+#
+# Should more be needed later, derive them from this base rather than generating
+# again - `. /lib/functions/system.sh` then macaddr_add "$mac" 1, and so on -
+# so the whole board stays one administratively-assigned block. The two Wi-Fi
+# radios are deliberately NOT given derived addresses here: ath11k supplies its
+# own, and overriding a working one blind would be a regression. Check what the
+# radios actually present on hardware before adding them.
 uci -q set "$dev.macaddr=$mac" || { echo "24_generate-macaddr: uci set failed" >&2; exit 1; }
 uci -q commit network || { echo "24_generate-macaddr: uci commit failed" >&2; exit 1; }
 [ "$(uci -q get "$dev.macaddr")" = "$mac" ] || {

@@ -1,46 +1,60 @@
 From: Muhammad Huda Nugroho <mhudan21@gmail.com>
-Subject: [PATCH] net: stmmac: dwmac-ipq5018: advertise only 2500BASEX on PCS GMAC1
+Subject: [PATCH] net: stmmac: dwmac-ipq5018: advertise only 2500BASEX on a
+ port pinned to it
 
-GMAC1 on the IPQ5018 drives an external 2.5G PHY (the RTL8221B on the
-QDM530 lan2 port) through the UNIPHY PCS. The driver advertises SGMII,
-1000BASEX and 2500BASEX for that port. Because the RTL8221B is a
-Clause-45 PHY, offering SGMII alongside 2500BASEX makes it select the
-2500BASEX/SGMII auto-switch SerDes mode (rate_matching = NONE): for a 1G
-copper peer the PHY drops its SerDes to SGMII and expects the UNIPHY to
-be reconfigured to SGMII at runtime. That runtime switch is unreliable
-on this hardware - the 1G link comes up but data does not flow reliably.
+GMAC1 can run SGMII, 1000BASEX or 2500BASEX through the UNIPHY PCS, and
+advertising all three is right for most boards. It is wrong for a board whose
+external PHY does rate matching: an RTL8221B offered both 2500BASEX and SGMII
+picks the 2500BASEX/SGMII auto-switch mode, which needs the UNIPHY switched to
+SGMII at runtime whenever the copper side negotiates 1G. That switch is
+unreliable here - a 1G peer links, and then no stable data flows.
 
-Advertise only 2500BASEX for the PCS-backed GMAC1 so the RTL8221B stays
-in the fixed 2500BASEX rate-matching mode (rate_matching = PAUSE): its
-SerDes is pinned at 2500BASEX and it pause-rate-adapts 1G/100/10 copper
-speeds internally, leaving the UNIPHY permanently at 2500BASEX. GMAC0
-(no PCS, internal GE PHY) keeps plain SGMII.
+Advertise only 2500BASEX when, and only when, device tree pins the port at
+2500base-x. The PHY then keeps its SerDes fixed and pause-rate-adapts slower
+copper speeds internally, which is what it is built to do. HW-verified on an
+IPQ5018 board (QDM530) against a native 2.5G peer and a 1G peer, including
+hot-plug between them.
+
+Keyed off plat->phy_interface rather than applied to every PCS-backed GMAC1:
+the earlier version of this took SGMII and 1000BASEX away from any board with a
+PCS, which removes capability from boards that have no rate-matching PHY and
+need the UNIPHY switching to work. Those keep the full set.
 
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac-ipq5018.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac-ipq5018.c
-@@ -112,13 +112,18 @@
- 
- 	/*
- 	 * IPQ5018 has two GMACs:
--	 * - GMAC0 supports SGMII and is wired to the SoC's internal GE PHY
--	 * - GMAC1 supports SGMII, 1000BaseX, and 2500BaseX, configurable by
--	 *   the UNIPHY PCS
-+	 * - GMAC0 is wired to the SoC's internal GE PHY over SGMII (no PCS).
-+	 * - GMAC1 drives an external 2.5G PHY through the UNIPHY PCS.
+@@ -115,7 +115,33 @@
+ 	 * - GMAC0 supports SGMII and is wired to the SoC's internal GE PHY
+ 	 * - GMAC1 supports SGMII, 1000BaseX, and 2500BaseX, configurable by
+ 	 *   the UNIPHY PCS
 +	 *
-+	 * For GMAC1 advertise only 2500BASEX (not SGMII/1000BASEX) so a
-+	 * rate-matching capable PHY (e.g. the RTL8221B) keeps its SerDes
-+	 * fixed at 2500BASEX and pause-rate-adapts slower copper speeds
-+	 * internally. Advertising SGMII as well makes such PHYs pick the
-+	 * 2500BASEX/SGMII auto-switch mode, which needs the UNIPHY switched
-+	 * to SGMII at runtime for 1G links; that switch is unreliable here
++	 * One exception, for a port that device tree pins at 2500base-x:
++	 * advertise only that. A rate-matching PHY (an RTL8221B, say) then
++	 * keeps its SerDes fixed at 2500BASEX and pause-rate-adapts slower
++	 * copper speeds internally. Offer it SGMII as well and it picks the
++	 * 2500BASEX/SGMII auto-switch mode instead, which needs the UNIPHY
++	 * switched to SGMII at runtime for a 1G link; that switch is unreliable
 +	 * and leaves 1G peers linked but without stable data flow.
++	 *
++	 * Keyed off the device-tree mode rather than applied to every
++	 * PCS-backed GMAC1, so a board that does not pin the mode keeps the
++	 * full set of interfaces.
  	 */
--	__set_bit(PHY_INTERFACE_MODE_SGMII, interfaces);
++	if (priv->hw->phylink_pcs &&
++	    priv->plat->phy_interface == PHY_INTERFACE_MODE_2500BASEX) {
++		__set_bit(PHY_INTERFACE_MODE_2500BASEX, interfaces);
++
++		/*
++		 * Synopsys DWMAC IP version 3.7 is limited to 1 Gpbs.
++		 * This vendor specific implementation supports 2.5 Gbps, so override
++		 * the default mac link capabilities.
++		 */
++		mac->link.caps |= MAC_2500FD;
++
++		return;
++	}
++
+ 	__set_bit(PHY_INTERFACE_MODE_SGMII, interfaces);
  	if (priv->hw->phylink_pcs) {
--		__set_bit(PHY_INTERFACE_MODE_1000BASEX, interfaces);
- 		__set_bit(PHY_INTERFACE_MODE_2500BASEX, interfaces);
- 
- 		/*
+ 		__set_bit(PHY_INTERFACE_MODE_1000BASEX, interfaces);

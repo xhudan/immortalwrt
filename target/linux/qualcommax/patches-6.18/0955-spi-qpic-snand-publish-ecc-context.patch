@@ -1,26 +1,41 @@
-From: QDM530 bring-up <noreply@example.com>
-Date: Fri, 19 Sep 2026 06:40:00 +0700
+From: Johan Alvarado <contact@c127.dev>
+Date: Thu, 11 Sep 2026 18:44:14 +0000
 Subject: [PATCH] spi: spi-qpic-snand: publish the ECC context to snandc->qspi
 
-The driver allocated a zeroed scratch qpic_ecc in probe and assigned it to
-snandc->qspi->ecc, but qcom_spi_ecc_init_ctx_pipelined() never published the
-real ecc_cfg it built. The ooblayout callbacks (run during spinand_init() /
-mtd registration at probe time) read snandc->qspi->ecc, i.e. the stale/zeroed
-scratch, so qecc->steps was garbage and oobregion->length = steps * 4 went
-negative. mtd_ooblayout_count_bytes() then returned a negative byte count,
-spinand_init() took it as a plain error (not -EPROBE_DEFER), the driver core
-never retried, and the NAND never appeared:
+qcom_spi_ooblayout_ecc() and qcom_spi_ooblayout_free() read the ECC
+configuration through snandc->qspi->ecc, which qcom_spi_probe() points at a
+zeroed scratch struct. qcom_spi_ecc_init_ctx_pipelined() installs the
+ooblayout but never publishes the context it just allocated, and
+qcom_spi_ecc_cleanup_ctx_pipelined() frees that context.
+
+So the ooblayout callbacks never see the real configuration. On a first probe
+they read the zeroed scratch; on a re-probe after a failure they read through a
+pointer to the context that cleanup already freed. Those are two different
+states and only the second is genuinely indeterminate, which is why the
+resulting failure is intermittent rather than constant.
+
+On an IPQ5018 board with an ESMT F50D1G41LB SPI-NAND, roughly half of all boots
+ended with the NAND never appearing:
 
   spi-nand spi0.0: probe with driver spi-nand failed with error -512
   UBI error: cannot open mtd rootfs, error -2
   Waiting for root device /dev/ubiblock0_1...
 
-On this board (IPQ5018 + ESMT F50D1G41LB SPI-NAND) roughly half of the boots
-hung this way. Publish the ECC context when it is created and clear it on
-cleanup; drop the redundant scratch allocation and the late assignment in the
-prepare_io_req path.
+Publish the context when it is created, clear the pointer when it is freed, and
+drop the scratch allocation and the late assignment in the prepare_io_req path
+that only existed to paper over the missing publication.
 
 Fixes: 7304d1909080 ("spi: spi-qpic: add driver for QCOM SPI NAND flash Interface")
+
+[Local backport note, not part of the upstream submission: this carries the two
+ upstream patches squashed into one, since they touch the same lines and the
+ second has no functional effect on its own:
+   f94c9b68bb5f ("spi: spi-qpic-snand: publish the ECC context to snandc->qspi")
+   8d6911645478 ("spi: spi-qpic-snand: drop the redundant ECC context handling")
+ Both were applied by Mark Brown to broonie/spi.git for-7.4 on 2026-09-18, so
+ nothing is to be submitted for this - drop the patch once the kernel here
+ carries them. The hashes are as quoted in the maintainer's reply on the v2
+ thread; they have not been checked against a local clone of that tree.]
 ---
 --- a/drivers/spi/spi-qpic-snand.c
 +++ b/drivers/spi/spi-qpic-snand.c

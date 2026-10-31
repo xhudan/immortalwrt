@@ -8,23 +8,42 @@ has no reference clock when the MDIO bus is scanned and reads back missing
 (-ENODEV), leaving the port permanently down. Mark the reference clock
 CLK_IS_CRITICAL so it is enabled from registration, before the MDIO scan.
 
+This is a workaround, not the eventual fix. CLK_IS_CRITICAL says "never gate
+this clock", while the actual requirement is narrower: one consumer needs it
+before it can be probed. Expressing that properly needs the PHY node to take a
+clocks phandle and the MDIO/PHY layer to enable it before identification, and
+as of 6.18 neither drivers/net/mdio/*.c nor phy_device.c looks at a clocks
+property on a PHY node - so there is no consumer side to move this to. Keep the
+flag until there is one.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/net/pcs/pcs-qca-uniphy.c
 +++ b/drivers/net/pcs/pcs-qca-uniphy.c
-@@ -221,8 +221,15 @@
+@@ -221,8 +221,26 @@
  	init.parent_data = &pdata;
  	init.num_parents = 1;
  	init.ops = &qca_uniphy_refclk_ops,
 -	/* always derive rate from the UNIPHY register */
 -	init.flags = CLK_GET_RATE_NOCACHE,
 +	/*
-+	 * always derive rate from the UNIPHY register; keep the reference clock
-+	 * enabled from registration (CLK_IS_CRITICAL) so the external 2.5G PHY
-+	 * that is fed by it (e.g. the RTL8221B on the IPQ5018 QDM530) already has
-+	 * its reference clock when the MDIO bus is scanned early in boot - the
-+	 * PCS mac_config that would otherwise enable it runs only after the
-+	 * boot-time PHY attach, too late, and the PHY reads back missing.
++	 * Always derive the rate from the UNIPHY register, and keep the
++	 * reference clock enabled from registration.
++	 *
++	 * The external 2.5G PHY fed by this clock (an RTL8221B on the IPQ5018
++	 * QDM530) needs it before the MDIO bus is scanned, which happens early
++	 * in boot; the PCS mac_config that would otherwise enable it runs only
++	 * after the boot-time PHY attach, too late, and the PHY reads back
++	 * missing.
++	 *
++	 * CLK_IS_CRITICAL overstates that: the real requirement is "this one
++	 * consumer needs the clock before it can be discovered", not "this
++	 * clock must never be gated". The native shape would be a consumer
++	 * relationship - the PHY node taking a clocks phandle and the MDIO or
++	 * PHY layer enabling it before identification - but nothing in
++	 * drivers/net/mdio/ or phy_device.c consumes a clocks property on a PHY
++	 * node, so there is no consumer to hand it to yet. Until there is,
++	 * dropping this flag means the PHY disappears from the bus.
 +	 */
 +	init.flags = CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL,
  
