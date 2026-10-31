@@ -63,16 +63,21 @@ case "$mac" in
 esac
 
 # $mac is the board's BASE address. Only one is assigned today, because only one
-# thing here needs one: both ethernet ports are bridged into br-lan (the WAN is
-# the cellular modem, whose address comes from the modem), so there is no second
-# ethernet interface to derive for.
+# interface here needs an address assigned: both ethernet ports are bridged into
+# br-lan, and the cellular WAN has no ethernet address at all - mhi_net_setup()
+# makes it ARPHRD_RAWIP with addr_len = 0, IFF_POINTOPOINT|IFF_NOARP - so there
+# is no second interface to derive one for.
 #
-# Should more be needed later, derive them from this base rather than generating
-# again - `. /lib/functions/system.sh` then macaddr_add "$mac" 1, and so on -
-# so the whole board stays one administratively-assigned block. The two Wi-Fi
-# radios are deliberately NOT given derived addresses here: ath11k supplies its
-# own, and overriding a working one blind would be a regression. Check what the
-# radios actually present on hardware before adding them.
+# Should that change, derive from this base rather than generating again -
+# `. /lib/functions/system.sh` then macaddr_add "$mac" 1, and so on - so the
+# whole board stays inside one administratively-assigned block.
+#
+# The two Wi-Fi radios are deliberately left alone, and NOT because they are
+# known to be fine: a board inspection showed addresses resembling the generic
+# Atheros range, which says nothing about whether they are unique per unit. That
+# is unresolved, not settled. Overriding them blind could equally well replace a
+# working address with a derived one, so it waits until the radios can actually
+# be inspected on hardware.
 uci -q set "$dev.macaddr=$mac" || { echo "24_generate-macaddr: uci set failed" >&2; exit 1; }
 uci -q commit network || { echo "24_generate-macaddr: uci commit failed" >&2; exit 1; }
 [ "$(uci -q get "$dev.macaddr")" = "$mac" ] || {

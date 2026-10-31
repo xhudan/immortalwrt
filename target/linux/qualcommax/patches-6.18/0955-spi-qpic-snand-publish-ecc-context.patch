@@ -1,6 +1,7 @@
 From: Johan Alvarado <contact@c127.dev>
 Date: Thu, 11 Sep 2026 18:44:14 +0000
-Subject: [PATCH] spi: spi-qpic-snand: publish the ECC context to snandc->qspi
+Subject: [PATCH 1/2] spi: spi-qpic-snand: publish the ECC context to
+ snandc->qspi
 
 qcom_spi_ooblayout_ecc() and qcom_spi_ooblayout_free() read the ECC
 configuration through snandc->qspi->ecc, which qcom_spi_probe() points at a
@@ -21,21 +22,17 @@ ended with the NAND never appearing:
   UBI error: cannot open mtd rootfs, error -2
   Waiting for root device /dev/ubiblock0_1...
 
-Publish the context when it is created, clear the pointer when it is freed, and
-drop the scratch allocation and the late assignment in the prepare_io_req path
-that only existed to paper over the missing publication.
+Publish the context when it is created and clear the pointer when it is freed.
 
 Fixes: 7304d1909080 ("spi: spi-qpic: add driver for QCOM SPI NAND flash Interface")
 
-[Local backport note, not part of the upstream submission: this carries the two
- upstream patches squashed into one, since they touch the same lines and the
- second has no functional effect on its own:
-   f94c9b68bb5f ("spi: spi-qpic-snand: publish the ECC context to snandc->qspi")
-   8d6911645478 ("spi: spi-qpic-snand: drop the redundant ECC context handling")
- Both were applied by Mark Brown to broonie/spi.git for-7.4 on 2026-09-18, so
- nothing is to be submitted for this - drop the patch once the kernel here
- carries them. The hashes are as quoted in the maintainer's reply on the v2
- thread; they have not been checked against a local clone of that tree.]
+[Backport note, not part of the upstream submission: upstream commit
+ f94c9b68bb5f, applied by Mark Brown to broonie/spi.git for-7.4 on 2026-09-18.
+ Nothing is to be submitted for this; drop the patch once the kernel here
+ carries it. The hash is a reference from the maintainer's application reply on
+ the v2 thread and has not been verified against a clone of that tree. Kept
+ split from its cleanup (0965) to mirror upstream, so that either can be
+ dropped independently - a stable kernel may well take this one alone.]
 ---
 --- a/drivers/spi/spi-qpic-snand.c
 +++ b/drivers/spi/spi-qpic-snand.c
@@ -59,37 +56,3 @@ Fixes: 7304d1909080 ("spi: spi-qpic: add driver for QCOM SPI NAND flash Interfac
  	kfree(ecc_cfg);
  }
  
-@@ -427,9 +431,7 @@
- 						 struct nand_page_io_req *req)
- {
- 	struct qcom_nand_controller *snandc = nand_to_qcom_snand(nand);
--	struct qpic_ecc *ecc_cfg = nand_to_ecc_ctx(nand);
- 
--	snandc->qspi->ecc = ecc_cfg;
- 	snandc->qspi->raw_rw = false;
- 	snandc->qspi->oob_rw = false;
- 	snandc->qspi->page_rw = false;
-@@ -1539,15 +1541,10 @@
- 	struct spi_controller *ctlr;
- 	struct qcom_nand_controller *snandc;
- 	struct qpic_spi_nand *qspi;
--	struct qpic_ecc *ecc;
- 	struct resource *res;
- 	const void *dev_data;
- 	int ret;
- 
--	ecc = devm_kzalloc(dev, sizeof(*ecc), GFP_KERNEL);
--	if (!ecc)
--		return -ENOMEM;
--
- 	qspi = devm_kzalloc(dev, sizeof(*qspi), GFP_KERNEL);
- 	if (!qspi)
- 		return -ENOMEM;
-@@ -1564,7 +1561,6 @@
- 	snandc->dev = dev;
- 	snandc->qspi = qspi;
- 	snandc->qspi->ctlr = ctlr;
--	snandc->qspi->ecc = ecc;
- 
- 	dev_data = of_device_get_match_data(dev);
- 	if (!dev_data) {

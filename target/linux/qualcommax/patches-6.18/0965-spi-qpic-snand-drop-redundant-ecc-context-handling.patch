@@ -1,0 +1,58 @@
+From: Johan Alvarado <contact@c127.dev>
+Date: Thu, 11 Sep 2026 18:44:14 +0000
+Subject: [PATCH 2/2] spi: spi-qpic-snand: drop the redundant ECC context
+ handling
+
+With the context published where it is created, the scratch qpic_ecc allocated
+in qcom_spi_probe() and the assignment in
+qcom_spi_ecc_prepare_io_req_pipelined() are both dead: the first only ever
+existed to give the ooblayout callbacks something non-NULL to read, and the
+second re-published on every page I/O what init_ctx now publishes once.
+
+No functional change when applied after the context-publication fix. It is not
+independent of it: applied alone to an unfixed baseline this would remove the
+pointer initialisation without supplying the replacement.
+
+[Backport note, not part of the upstream submission: upstream commit
+ 8d6911645478, applied by Mark Brown to broonie/spi.git for-7.4 on 2026-09-18,
+ as 2/2 of the series whose first patch is carried here as 0955. Same caveat on
+ the hash. Split from 0955 so that either can be removed once the kernel here
+ supplies the corresponding change - if it gains only the functional fix, drop
+ 0955 and keep this; it does NOT mean either may be omitted on its own.]
+---
+--- a/drivers/spi/spi-qpic-snand.c
++++ b/drivers/spi/spi-qpic-snand.c
+@@ -431,9 +431,7 @@
+ 						 struct nand_page_io_req *req)
+ {
+ 	struct qcom_nand_controller *snandc = nand_to_qcom_snand(nand);
+-	struct qpic_ecc *ecc_cfg = nand_to_ecc_ctx(nand);
+ 
+-	snandc->qspi->ecc = ecc_cfg;
+ 	snandc->qspi->raw_rw = false;
+ 	snandc->qspi->oob_rw = false;
+ 	snandc->qspi->page_rw = false;
+@@ -1539,15 +1537,10 @@
+ 	struct spi_controller *ctlr;
+ 	struct qcom_nand_controller *snandc;
+ 	struct qpic_spi_nand *qspi;
+-	struct qpic_ecc *ecc;
+ 	struct resource *res;
+ 	const void *dev_data;
+ 	int ret;
+ 
+-	ecc = devm_kzalloc(dev, sizeof(*ecc), GFP_KERNEL);
+-	if (!ecc)
+-		return -ENOMEM;
+-
+ 	qspi = devm_kzalloc(dev, sizeof(*qspi), GFP_KERNEL);
+ 	if (!qspi)
+ 		return -ENOMEM;
+@@ -1564,7 +1557,6 @@
+ 	snandc->dev = dev;
+ 	snandc->qspi = qspi;
+ 	snandc->qspi->ctlr = ctlr;
+-	snandc->qspi->ecc = ecc;
+ 
+ 	dev_data = of_device_get_match_data(dev);
+ 	if (!dev_data) {

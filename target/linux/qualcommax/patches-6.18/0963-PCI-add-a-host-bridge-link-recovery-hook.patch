@@ -317,7 +317,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	qcom_pcie_icc_opp_update(pcie);
  
  	if (pcie->mhi)
-@@ -2027,7 +2201,16 @@
+@@ -2027,7 +2201,27 @@
  	 * powerdown state. This will affect the lifetime of the storage devices
  	 * like NVMe.
  	 */
@@ -328,6 +328,17 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 +	 * over resources it has already released, is exactly what
 +	 * ->relink_hw_off exists to prevent - so only record that the
 +	 * controller has to be brought back up on resume.
++	 *
++	 * These two flags are a targeted fix, not a hardware-state model, and
++	 * do not make every combination recoverable. A failed resume leaves
++	 * ->suspended set, after which link recovery refuses with -EBUSY rather
++	 * than becoming a runtime retry of that resume. An ordinary suspend
++	 * followed by a failed resume leaves ->suspended true with
++	 * ->relink_hw_off false even though the resources are off; ->suspended
++	 * is what keeps recovery from releasing them twice there, not the new
++	 * flag. And clearing ->relink_hw_off on resume says the resources were
++	 * re-acquired - not that the root complex was re-set-up, the link
++	 * retrained, or any endpoint restored, none of which resume does.
 +	 */
 +	if (pcie->relink_hw_off) {
 +		pcie->suspended = true;
@@ -335,7 +346,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  		qcom_pcie_host_deinit(&pcie->pci->pp);
  		pcie->suspended = true;
  	}
-@@ -2072,6 +2255,8 @@
+@@ -2072,6 +2266,8 @@
  			return ret;
  
  		pcie->suspended = false;

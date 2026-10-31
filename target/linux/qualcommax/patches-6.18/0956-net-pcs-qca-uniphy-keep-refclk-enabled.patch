@@ -1,26 +1,37 @@
 From: Muhammad Huda Nugroho <mhudan21@gmail.com>
 Subject: [PATCH] net: pcs: qca-uniphy: keep the reference clock enabled
 
-The UNIPHY reference clock feeds external 2.5G PHYs (e.g. the RTL8221B on
-the IPQ5018 QDM530 lan2 port). It is normally enabled only in the PCS
-mac_config path, which runs after the boot-time PHY attach - so the PHY
-has no reference clock when the MDIO bus is scanned and reads back missing
-(-ENODEV), leaving the port permanently down. Mark the reference clock
-CLK_IS_CRITICAL so it is enabled from registration, before the MDIO scan.
+The external 2.5G PHY driven by this PCS (an RTL8221B on the IPQ5018 QDM530) is
+fed by the UNIPHY reference clock, and needs it before the MDIO bus is scanned.
+The PCS mac_config() that would otherwise enable it runs only after the
+boot-time PHY attach - too late, and the PHY reads back missing, so the bus
+scan finds nothing.
 
-This is a workaround, not the eventual fix. CLK_IS_CRITICAL says "never gate
-this clock", while the actual requirement is narrower: one consumer needs it
-before it can be probed. Expressing that properly needs the PHY node to take a
-clocks phandle and the MDIO/PHY layer to enable it before identification, and
-as of 6.18 neither drivers/net/mdio/*.c nor phy_device.c looks at a clocks
-property on a PHY node - so there is no consumer side to move this to. Keep the
-flag until there is one.
+Mark the clock CLK_IS_CRITICAL so it is enabled from registration.
+
+This is a workaround and the commit message should not pretend otherwise.
+CLK_IS_CRITICAL says "never gate this clock", while the requirement is narrower:
+one consumer needs it before it can be discovered. The reason there is nowhere
+better to put it is that the dependency has to be met BEFORE discovery - a PHY
+driver acquiring the clock in its own probe is too late, because without the
+clock the PHY cannot answer the identification reads that would create and bind
+that device at all. That makes it a bus-side concern, which is the shape
+mdio-ipq4019.c already uses for its own controller clock (clk_prepare_enable()
+in probe, before the bus is registered). Pointing that mechanism at the UNIPHY
+reference clock would misdescribe the hardware - it belongs to the PHY, not to
+the MDIO controller - and as of 6.18 nothing in drivers/net/mdio/ or
+drivers/net/phy/phy_device.c consumes a per-PHY clock before discovery, so
+there is no correct consumer to hand it to.
+
+Worth raising upstream as a missing pre-discovery clock dependency rather than
+carried as a local flag forever. Until then, dropping this makes the PHY
+disappear from the bus.
 
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/net/pcs/pcs-qca-uniphy.c
 +++ b/drivers/net/pcs/pcs-qca-uniphy.c
-@@ -221,8 +221,26 @@
+@@ -220,8 +220,31 @@
  	init.parent_data = &pdata;
  	init.num_parents = 1;
  	init.ops = &qca_uniphy_refclk_ops,
@@ -36,14 +47,19 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 +	 * after the boot-time PHY attach, too late, and the PHY reads back
 +	 * missing.
 +	 *
-+	 * CLK_IS_CRITICAL overstates that: the real requirement is "this one
-+	 * consumer needs the clock before it can be discovered", not "this
-+	 * clock must never be gated". The native shape would be a consumer
-+	 * relationship - the PHY node taking a clocks phandle and the MDIO or
-+	 * PHY layer enabling it before identification - but nothing in
-+	 * drivers/net/mdio/ or phy_device.c consumes a clocks property on a PHY
-+	 * node, so there is no consumer to hand it to yet. Until there is,
-+	 * dropping this flag means the PHY disappears from the bus.
++	 * CLK_IS_CRITICAL overstates that. The requirement is "one consumer
++	 * needs this clock before it can be discovered", not "this clock must
++	 * never be gated" - but there is nowhere better to express it yet. A
++	 * PHY driver taking the clock in its own probe is too late: without the
++	 * clock the PHY cannot answer the identification reads that would
++	 * create and bind that device in the first place. The dependency has to
++	 * be satisfied BEFORE discovery, which means the bus side - the shape
++	 * mdio-ipq4019.c already uses for its own controller clock, enabling it
++	 * in probe before registering the bus. Pointing that at the UNIPHY
++	 * reference clock instead would misdescribe the hardware, since it is
++	 * the PHY's clock and not the MDIO controller's, and no generic
++	 * pre-discovery mechanism exists for a per-PHY resource. So this stays
++	 * until there is one.
 +	 */
 +	init.flags = CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL,
  

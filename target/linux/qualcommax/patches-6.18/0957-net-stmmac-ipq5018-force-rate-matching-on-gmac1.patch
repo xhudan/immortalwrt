@@ -20,17 +20,33 @@ the earlier version of this took SGMII and 1000BASEX away from any board with a
 PCS, which removes capability from boards that have no rate-matching PHY and
 need the UNIPHY switching to work. Those keep the full set.
 
+To be precise about what the key means, since it is the weak point of this
+patch: phy-mode = "2500base-x" states the configured interface, it does not
+declare that runtime interface switching is forbidden, and phylink will let a
+PHY change interface when the MAC advertises more than one. Reading it as a
+restriction is this driver's policy, chosen because the switch is unreliable on
+this IP. It therefore still affects any board using this driver in that mode,
+including one that wanted dynamic switching to work - narrower than before, but
+not free. Upstream this needs either a justification covering every 2500BASE-X
+configuration of this driver, or a narrower key than the interface mode.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/net/ethernet/stmicro/stmmac/dwmac-ipq5018.c
 +++ b/drivers/net/ethernet/stmicro/stmmac/dwmac-ipq5018.c
-@@ -115,7 +115,33 @@
+@@ -115,7 +115,39 @@
  	 * - GMAC0 supports SGMII and is wired to the SoC's internal GE PHY
  	 * - GMAC1 supports SGMII, 1000BaseX, and 2500BaseX, configurable by
  	 *   the UNIPHY PCS
 +	 *
-+	 * One exception, for a port that device tree pins at 2500base-x:
-+	 * advertise only that. A rate-matching PHY (an RTL8221B, say) then
++	 * One exception. When device tree configures this port as 2500base-x,
++	 * this driver treats that as "stay there" and advertises only that
++	 * mode. Note that is a policy of this driver, not something the DT
++	 * property means on its own: phy-mode states the configured interface,
++	 * and phylink is perfectly willing to let a PHY change interface at
++	 * runtime when the MAC advertises more than one.
++	 *
++	 * The reason to refuse that here: a rate-matching PHY (an RTL8221B, say) then
 +	 * keeps its SerDes fixed at 2500BASEX and pause-rate-adapts slower
 +	 * copper speeds internally. Offer it SGMII as well and it picks the
 +	 * 2500BASEX/SGMII auto-switch mode instead, which needs the UNIPHY

@@ -1,0 +1,107 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] net: mhi_net: stop refilling, and drain the refill work, once
+ the device is down
+
+mhi_ndo_stop() cancels the refill work, but nothing stops a DL completion from
+re-arming it afterwards. That window has two consequences, and only the second
+is serious.
+
+The harmless one is the buffer. A completion that slips past the stop and queues
+one is not lost: mhi_gen_tre() checks ch_state == MHI_CH_STATE_ENABLED and
+publishes the TRE while holding mhi_chan->lock, and mhi_unprepare_channel()
+takes that same lock to set MHI_CH_STATE_DISABLED before mhi_reset_chan()
+reclaims what is queued. Either publication wins the lock and teardown reclaims
+the buffer with -ENOTCONN, which mhi_net_dl_callback() frees, or the disable wins
+and mhi_queue_skb() refuses it and the callback frees it. Nothing is published
+that is not then reclaimed.
+
+The serious one is the work item. If that late completion fails to allocate or to
+queue, it schedules rx_refill - and mhi_net_dellink() then unprepares the
+channels and calls free_netdev() with the work still pending.
+mhi_net_rx_refill_work() reaches mhi_netdev, ndev and mdev through the netdev
+private area, so that is a use-after-free rather than a stray skb, and gating the
+worker on netif_running() would not help: reading the freed ndev is the problem.
+
+So: gate both refill paths on netif_running() in the completion handler -
+__dev_close_many() clears __LINK_STATE_START before calling ndo_stop, so the gate
+is already false when ndo_stop's cancellation runs - and drain the work once more
+in mhi_net_dellink(), after mhi_unprepare_from_transfer() has disabled the
+channels so that no new completion can re-arm it.
+
+That is narrowed, not airtight, and should not be presented as a complete
+teardown fix: mhi_unprepare_channel() stops new events but nothing in it waits
+for a callback already executing, and MHI exposes no callback-quiesce point to
+place the drain after. A completion in flight can still re-arm the work after the
+final cancellation returns.
+
+Only the allocation/queue failure branch reaches the dangerous path, so a normal
+successful-refill test will never exercise it; validating this wants fault
+injection on that branch concurrent with close and removal.
+
+Logically this belongs BEFORE the inline refill that made the window reachable;
+it is ordered after it here only because that is where the local patch stack
+already stood.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+--- a/drivers/net/mhi_net.c
++++ b/drivers/net/mhi_net.c
+@@ -240,7 +240,31 @@
+ 	 * queue_is_full() test above - is the authoritative check, so losing
+ 	 * that race against the fallback worker only costs one allocation.
+ 	 */
+-	if (!mhi_queue_is_full(mhi_dev, DMA_FROM_DEVICE)) {
++	/*
++	 * Do not hand buffers back to a device that is going down.
++	 * __dev_close_many() clears __LINK_STATE_START before calling
++	 * ndo_stop, so this is false by the time mhi_ndo_stop() runs its
++	 * cancel_delayed_work_sync() - which is what stops an ordinary
++	 * completion arriving after that cancellation from refilling, inline or
++	 * through the work, behind the teardown's back.
++	 *
++	 * This is a gate, not a barrier: a callback already past it can still
++	 * reach the code below. For the BUFFER that is harmless, and the reason
++	 * is the channel lock rather than the order these functions are called
++	 * in. mhi_gen_tre() checks ch_state == MHI_CH_STATE_ENABLED and
++	 * publishes the TRE while holding mhi_chan->lock, and
++	 * mhi_unprepare_channel() takes the same lock to set
++	 * MHI_CH_STATE_DISABLED before mhi_reset_chan() reclaims what is
++	 * queued. So either publication wins the lock and teardown reclaims the
++	 * buffer with -ENOTCONN, which the error path above frees, or the
++	 * disable wins and mhi_queue_skb() refuses it and we free it here.
++	 * Nothing is published that is not then reclaimed.
++	 *
++	 * The WORK ITEM is a different question and is not solved here - see
++	 * the cancellation in mhi_net_dellink().
++	 */
++	if (netif_running(mhi_netdev->ndev) &&
++	    !mhi_queue_is_full(mhi_dev, DMA_FROM_DEVICE)) {
+ 		unsigned int size = mhi_netdev->mru ? mhi_netdev->mru :
+ 					READ_ONCE(mhi_netdev->ndev->mtu);
+ 		struct sk_buff *nskb = netdev_alloc_skb(mhi_netdev->ndev, size);
+@@ -363,6 +387,25 @@
+ 
+ 	mhi_unprepare_from_transfer(mhi_dev);
+ 
++	/*
++	 * Drain the refill work again, now that its producers are gone:
++	 * unregister_netdev() ran ndo_stop (whose own cancellation a later DL
++	 * completion could still have defeated) and
++	 * mhi_unprepare_from_transfer() has disabled the channels, so no new
++	 * completion can arrive to re-arm it. Without this, a completion that
++	 * failed to allocate or queue could leave the work pending over
++	 * free_netdev(), and mhi_net_rx_refill_work() reaches ndev and mdev
++	 * through the netdev private area - a use-after-free, not a stray skb.
++	 *
++	 * Not an airtight drain: mhi_unprepare_channel() sets
++	 * MHI_CH_STATE_DISABLED under mhi_chan->lock and resets the channel,
++	 * which stops new events, but nothing there waits for a callback that
++	 * is already executing. MHI exposes no callback-quiesce point to place
++	 * this after, so a completion still in flight can re-arm the work after
++	 * this returns. The window is narrowed, not closed.
++	 */
++	cancel_delayed_work_sync(&mhi_netdev->rx_refill);
++
+ 	kfree_skb(mhi_netdev->skbagg_head);
+ 
+ 	free_netdev(ndev);
