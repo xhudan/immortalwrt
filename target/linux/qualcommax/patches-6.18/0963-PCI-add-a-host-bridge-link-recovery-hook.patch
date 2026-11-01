@@ -79,11 +79,47 @@ A single write-only attribute drives it ("recover", or "recover <timeout_ms>"),
 so a userspace modem supervisor can use it as a recovery step before falling back
 to rebooting the board.
 
+First execution on hardware (QDM530, IPQ5018 + RG520N-EB, 2026-11-01), on a
+modem that had died with MHI "Device died" and whose link was already down:
+
+  mhi-pci-generic 0001:01:00.0: quiesced for link recovery
+  qcom-pcie 80000000.pcie: relink: no link after 30000 ms
+  mhi-pci-generic 0001:01:00.0: host link recovery failed: -110
+
+The write returned -ETIMEDOUT to userspace rather than hanging, the 30 s wait
+in process context did not starve the board's external watchdog, and no splat
+or refcount warning followed.
+
+The link did not come back, and that bounds what the run shows: this sequence
+did not recover this instance within the timeout. It does not distinguish a
+modem wedged in its own firmware from a reset-sequencing, endpoint power-state
+or initialisation problem, and it says nothing about a link that went down for
+a recoverable reason. Coverage was partial in another way too: the automatic
+recovery had already cleared MHI_PCI_DEV_STARTED before its own failed reset
+attempt, so this write almost certainly skipped the conditional mhi_power_down()
+and parked an endpoint that was already torn down.
+
+A failed recovery deliberately leaves the endpoint parked: quiesced, runtime PM
+disabled, health check off, so nothing touches a dead link, and a second write
+skips phase 1 and retries only the link training. Only a successful recovery or
+a reboot returns it to normal operation, and mhi_pci_remove() balances the
+runtime-PM disable because the generic unbind path's pm_runtime_reinit() does
+not clear disable_depth.
+
+What the parked state does NOT establish is that nothing reaches the endpoint:
+system PM goes through mhi_pci_suspend() -> mhi_pci_runtime_suspend() without
+consulting the flag, reset_prepare()/reset_done() and shutdown ignore it too,
+and generic PCI config access is not gated by an MHI flag at all. Extending the
+flag to those callbacks needs a deliberate lock order, not just more test_bit()
+calls, since recovery_mutex currently serialises writers only.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index 7e3459b..51badc9 100644
 --- a/include/linux/pci.h
 +++ b/include/linux/pci.h
-@@ -637,6 +637,29 @@
+@@ -637,6 +637,29 @@ struct pci_host_bridge {
  			resource_size_t start,
  			resource_size_t size,
  			resource_size_t align);
@@ -113,6 +149,8 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	unsigned long	private[] ____cacheline_aligned;
  };
  
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+index 1186044..30e8d4c 100644
 --- a/drivers/pci/controller/dwc/pcie-qcom.c
 +++ b/drivers/pci/controller/dwc/pcie-qcom.c
 @@ -20,6 +20,7 @@
@@ -123,7 +161,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  #include <linux/of.h>
  #include <linux/of_pci.h>
  #include <linux/pci.h>
-@@ -284,6 +285,13 @@
+@@ -284,6 +285,13 @@ struct qcom_pcie {
  	struct dentry *debugfs;
  	struct list_head ports;
  	bool suspended;
@@ -137,7 +175,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	bool use_pm_opp;
  };
  
-@@ -1802,6 +1810,164 @@
+@@ -1802,6 +1810,164 @@ static int qcom_pcie_parse_legacy_binding(struct qcom_pcie *pcie)
  	return 0;
  }
  
@@ -302,7 +340,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  static int qcom_pcie_probe(struct platform_device *pdev)
  {
  	const struct qcom_pcie_cfg *pcie_cfg;
-@@ -1970,6 +2136,14 @@
+@@ -1970,6 +2136,14 @@ static int qcom_pcie_probe(struct platform_device *pdev)
  		goto err_phy_exit;
  	}
  
@@ -317,7 +355,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	qcom_pcie_icc_opp_update(pcie);
  
  	if (pcie->mhi)
-@@ -2027,7 +2201,27 @@
+@@ -2027,7 +2201,27 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
  	 * powerdown state. This will affect the lifetime of the storage devices
  	 * like NVMe.
  	 */
@@ -346,7 +384,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  		qcom_pcie_host_deinit(&pcie->pci->pp);
  		pcie->suspended = true;
  	}
-@@ -2072,6 +2266,8 @@
+@@ -2072,6 +2266,8 @@ static int qcom_pcie_resume_noirq(struct device *dev)
  			return ret;
  
  		pcie->suspended = false;
@@ -355,6 +393,8 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	}
  
  	qcom_pcie_icc_opp_update(pcie);
+diff --git a/drivers/bus/mhi/host/pci_generic.c b/drivers/bus/mhi/host/pci_generic.c
+index 49fb665..a44a92a 100644
 --- a/drivers/bus/mhi/host/pci_generic.c
 +++ b/drivers/bus/mhi/host/pci_generic.c
 @@ -13,7 +13,9 @@
@@ -367,7 +407,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  #include <linux/timer.h>
  #include <linux/workqueue.h>
  
-@@ -1024,6 +1026,13 @@
+@@ -1024,6 +1026,13 @@ MODULE_DEVICE_TABLE(pci, mhi_pci_id_table);
  enum mhi_pci_device_status {
  	MHI_PCI_DEV_STARTED,
  	MHI_PCI_DEV_SUSPENDED,
@@ -381,7 +421,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  };
  
  struct mhi_pci_device {
-@@ -1031,6 +1040,8 @@
+@@ -1031,6 +1040,8 @@ struct mhi_pci_device {
  	struct pci_saved_state *pci_state;
  	struct work_struct recovery_work;
  	struct timer_list health_check_timer;
@@ -390,7 +430,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	unsigned long status;
  	bool reset_on_remove;
  };
-@@ -1198,6 +1209,9 @@
+@@ -1198,6 +1209,9 @@ static void mhi_pci_recovery_work(struct work_struct *work)
  	struct pci_dev *pdev = to_pci_dev(mhi_cntrl->cntrl_dev);
  	int err;
  
@@ -400,7 +440,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	dev_warn(&pdev->dev, "device recovery started\n");
  
  	if (!pdev->is_virtfn)
-@@ -1243,6 +1257,249 @@
+@@ -1243,6 +1257,257 @@ err_try_reset:
  		dev_err(&pdev->dev, "Recovery failed: %d\n", err);
  }
  
@@ -506,8 +546,16 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 + * a suspend in flight when this started may have completed in the meantime.
 + *
 + * On failure the device is left quiesced with runtime PM still disabled, so the
-+ * write can simply be retried; nothing touches the endpoint until one attempt
-+ * succeeds.
++ * write can simply be retried: phase 1 is skipped and only the link training is
++ * attempted again.
++ *
++ * That parked state stops THIS driver's own periodic and deferred work - the
++ * health-check timer, the recovery worker, and runtime-PM resumes. It is not an
++ * isolation of the endpoint: system PM still reaches it through
++ * mhi_pci_suspend(), reset_prepare()/reset_done() and shutdown do not consult
++ * MHI_PCI_DEV_QUIESCED, and generic PCI config access is not gated by an MHI
++ * flag at all. Extending the flag to those callbacks needs a deliberate lock
++ * order, since recovery_mutex serialises writers only.
 + */
 +static ssize_t link_recovery_store(struct device *dev,
 +				   struct device_attribute *attr,
@@ -650,7 +698,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  static void health_check(struct timer_list *t)
  {
  	struct mhi_pci_device *mhi_pdev = timer_container_of(mhi_pdev, t,
-@@ -1250,7 +1507,8 @@
+@@ -1250,7 +1515,8 @@ static void health_check(struct timer_list *t)
  	struct mhi_controller *mhi_cntrl = &mhi_pdev->mhi_cntrl;
  
  	if (!test_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status) ||
@@ -660,7 +708,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  		return;
  
  	if (!mhi_pci_is_alive(mhi_cntrl)) {
-@@ -1313,6 +1571,7 @@
+@@ -1313,6 +1579,7 @@ static int mhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
  	if (!mhi_pdev)
  		return -ENOMEM;
  
@@ -668,7 +716,24 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  	INIT_WORK(&mhi_pdev->recovery_work, mhi_pci_recovery_work);
  
  	if (pdev->is_virtfn && info->vf_config)
-@@ -1704,6 +1963,7 @@
+@@ -1424,6 +1691,16 @@ static void mhi_pci_remove(struct pci_dev *pdev)
+ 		timer_delete_sync(&mhi_pdev->health_check_timer);
+ 	cancel_work_sync(&mhi_pdev->recovery_work);
+ 
++	/*
++	 * A failed link recovery parks the device with runtime PM disabled
++	 * (see mhi_pci_link_recovery()). Balance that here: the generic
++	 * unbind path's pm_runtime_reinit() does not clear disable_depth, so
++	 * leaving it set would carry this driver's disable into the next bind
++	 * after the state that explains it is gone.
++	 */
++	if (test_and_clear_bit(MHI_PCI_DEV_QUIESCED, &mhi_pdev->status))
++		pm_runtime_enable(&pdev->dev);
++
+ 	if (test_and_clear_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status)) {
+ 		mhi_power_down(mhi_cntrl, true);
+ 		mhi_unprepare_after_power_down(mhi_cntrl);
+@@ -1704,6 +1981,7 @@ static struct pci_driver mhi_pci_driver = {
  	.remove		= mhi_pci_remove,
  	.shutdown	= mhi_pci_shutdown,
  	.err_handler	= &mhi_pci_err_handler,
