@@ -24,34 +24,68 @@
 [ "${ACTION}" = "add" ] || exit 0
 
 . /lib/functions.sh
+. /lib/functions/system.sh
 
 [ "$(board_name)" = "unbranded,qdm530" ] || exit 0
 
 have_5g=0
 changed=0
 
-# Seed only what is ABSENT. An earlier version re-asserted channel/htmode/country
-# on every event, which silently reverted anything the operator had deliberately
-# changed - a default belongs at first boot, not enforced for the life of the
-# device. Note that a configured 5 GHz section is not proof the radio is present;
-# it only means one was detected at some point.
-fixup_5g() {
+# Apply the board defaults ONCE, on the radio's first appearance, recorded by a marker.
+#
+# Two earlier versions of this were both wrong. The first re-asserted channel, htmode and
+# country on every event, which silently reverted anything the operator had changed. The
+# second only filled in values that were absent - which sounds safer and is useless here,
+# because `wifi detect` has already written its own htmode (HE80) by the time this runs, so
+# the board's HE160 default never got applied at all. Verified on hardware: a fresh
+# `sysupgrade -n` came up at 80 MHz.
+#
+# "Absent" was the wrong test. What distinguishes the operator's choice from a generated
+# default is not emptiness, it is whether we have ever seeded this board before.
+SEEDED=/etc/qdm530-5ghz-seeded
+
+seed_5g() {
 	local radio="$1" band
 	config_get band "$radio" band
 	[ "$band" = "5g" ] || return 0
 	have_5g=1
-	[ -n "$(uci -q get "wireless.$radio.channel")" ] || {
-		uci -q set "wireless.$radio.channel=36"; changed=1; }
-	[ -n "$(uci -q get "wireless.$radio.htmode")" ] || {
-		uci -q set "wireless.$radio.htmode=HE160"; changed=1; }
-	[ -n "$(uci -q get "wireless.$radio.country")" ] || {
-		uci -q set "wireless.$radio.country=CN"; changed=1; }
+	[ -e "$SEEDED" ] && return 0          # operator territory from here on
+	uci -q set "wireless.$radio.channel=36"
+	uci -q set "wireless.$radio.htmode=HE160"
+	uci -q set "wireless.$radio.country=CN"
+	changed=1
+}
+
+# A stable BSSID per radio, derived from the board's base address (24_generate-macaddr).
+# Set on the wifi-iface, which is the section mac80211 actually applies - not on the
+# wifi-device, where `macaddr` is a phy selector. Without this the phy address is random
+# per boot: this board read 00:03:7f:12:1d:1d then 00:03:7f:12:2a:2a across two boots.
+seed_iface_mac() {
+	local ifsec="$1" dev base off mac
+	[ -n "$(uci -q get "wireless.$ifsec.macaddr")" ] && return 0
+	config_get dev "$ifsec" device
+	[ -n "$dev" ] || return 0
+	base=$(uci -q get network.@device[0].macaddr)
+	[ -n "$base" ] || base=$(cat /sys/class/net/br-lan/address 2>/dev/null)
+	[ -n "$base" ] || return 0
+	case "$(uci -q get "wireless.$dev.band")" in
+		2g) off=1 ;;
+		5g) off=2 ;;
+		*)  return 0 ;;
+	esac
+	mac=$(macaddr_add "$base" "$off") || return 0
+	case "$mac" in
+		??:??:??:??:??:??) uci -q set "wireless.$ifsec.macaddr=$mac"; changed=1 ;;
+	esac
 }
 
 config_load wireless
-config_foreach fixup_5g wifi-device
+config_foreach seed_5g wifi-device
+[ -e "$SEEDED" ] || config_foreach seed_iface_mac wifi-iface
 
-[ "$changed" = 1 ] && uci -q commit wireless
+if [ "$changed" = 1 ]; then
+	uci -q commit wireless && : > "$SEEDED"
+fi
 
 # Only when the 5 GHz radio is actually present (this is its hotplug, not the 2.4
 # GHz one): reload the wireless stack to bring both radios up cleanly. wifi touches

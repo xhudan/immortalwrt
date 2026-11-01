@@ -1,3 +1,23 @@
+# Radio addresses are NOT set here, and the reason is worth writing down because the first
+# attempt got it wrong in two ways at once, both only visible on hardware:
+#
+#  1. It wrote `macaddr` on the `wifi-device` section. For mac80211 that field is a phy
+#     SELECTOR, not a setter - our sections already select by `path`, so the write was inert
+#     (uci said da:12:ff:ea:7e:2e while the interface stayed on 00:03:7f:12:2a:2a), and
+#     writing a non-matching address there risks breaking phy matching instead.
+#     The setter is `macaddr` on the `wifi-iface`.
+#  2. It ran here at all. The QCN9074 enumerates over PCIe ~20 s into boot, AFTER
+#     uci-defaults - which is the whole reason hotplug.d/ieee80211/13-qdm530-5ghz-channel
+#     exists - so only the 2.4 GHz radio existed to be seeded.
+#
+# Both radios are therefore seeded from the hotplug script, which runs when a radio
+# actually appears and can address its wifi-iface. This file owns the base address only.
+#
+# Why it matters at all: the phy addresses are not merely non-unique, they are not stable.
+# Across two boots of this board they read 00:03:7f:12:1d:1d / :71:71 and then
+# 00:03:7f:12:2a:2a / :6d:6d - a different BSSID every boot, which breaks client
+# allow-lists and DHCP reservations.
+
 #!/bin/sh
 #
 # QDM530 stores no MAC address anywhere in hardware: 0:ART reads back all 0xff,
