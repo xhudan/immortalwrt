@@ -24,11 +24,17 @@ radios="$(uci -q show wireless | sed -n 's/^wireless\.\([^.]*\)=wifi-device$/\1/
 # scripts are only removed once they exit successfully.
 [ -n "$radios" ] || exit 1
 
+# Only where the operator has not chosen one. This runs once per flash that wipes
+# config, but a config-PRESERVING sysupgrade re-runs nothing - so the only reader
+# of an existing value is a re-added uci-default or a hand-edited config, and
+# overwriting there would silently replace a deliberate choice with ours.
+changed=
 for radio in $radios; do
-	uci -q set "wireless.$radio.country=CN"
+	[ -n "$(uci -q get "wireless.$radio.country")" ] && continue
+	uci -q set "wireless.$radio.country=CN" && changed=1
 done
 
-uci -q commit wireless
+[ "$changed" = 1 ] && { uci -q commit wireless || exit 1; }
 
 # The 5GHz radio's channel/width is NOT fixed here. The QCN9074 sits on PCIe and
 # enumerates ~20s into boot, after this script runs, so it is usually not in the

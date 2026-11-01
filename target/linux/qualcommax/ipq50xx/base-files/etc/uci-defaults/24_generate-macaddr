@@ -101,23 +101,14 @@ uci -q commit network || { echo "24_generate-macaddr: uci commit failed" >&2; ex
 [ "$(uci -q get "$dev.macaddr")" = "$mac" ] || {
 	echo "24_generate-macaddr: $mac did not persist" >&2; exit 1; }
 
-# Derive one address per radio from the same base, offset so they cannot collide with the
-# bridge. macaddr_add keeps the locally-administered bit, since it only adds to the low
-# bytes.
-i=0
-offset=1
-while uci -q get "wireless.@wifi-device[$i]" >/dev/null 2>&1; do
-	if [ -z "$(uci -q get "wireless.@wifi-device[$i].macaddr")" ]; then
-		radio_mac=$(macaddr_add "$mac" "$offset")
-		case "$radio_mac" in
-			$H$H:$H$H:$H$H:$H$H:$H$H:$H$H)
-				uci -q set "wireless.@wifi-device[$i].macaddr=$radio_mac" || break ;;
-			*) echo "24_generate-macaddr: refusing malformed radio mac '$radio_mac'" >&2 ;;
-		esac
-	fi
-	offset=$((offset + 1))
-	i=$((i + 1))
-done
-[ "$i" -gt 0 ] && { uci -q commit wireless || echo "24_generate-macaddr: wireless commit failed" >&2; }
+# No radio addresses are written here, on purpose. An earlier version derived one
+# per radio into `wireless.@wifi-device[N].macaddr`, which does nothing: on a
+# wifi-device that field is a phy SELECTOR (mac80211 matches a phy by it), not a
+# setter. HW-seen: uci read back da:12:ff:ea:7e:2e while the interface kept
+# 00:03:7f:12:2a:2a. The setter is `macaddr` on the wifi-iface, and the radios do
+# not exist yet when this uci-default runs - the QCN9074 enumerates ~20 s into
+# boot - so it is done from the ieee80211 hotplug instead
+# (hotplug.d/ieee80211/13-qdm530-5ghz-channel, seed_iface_mac). Keeping both
+# would mean two mechanisms writing the same-named field with different meanings.
 
 exit 0
