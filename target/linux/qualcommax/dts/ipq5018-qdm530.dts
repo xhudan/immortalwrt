@@ -65,28 +65,45 @@
 		 * its bootargs env, so this has to live in the FDT bootargs-append.)
 		 */
 		/*
-		 * pci=noaer: the 5G modem on pcie1 crashes its link whenever it SSRs
-		 * (poor RF, or a D3hot power transition). The root port then raises a
-		 * PCIe AER interrupt, and the kernel AER service (aer_isr ->
-		 * pci_walk_bus -> find_device_iter) reads the config space of every
-		 * device to find the source - including the modem, whose link is now
-		 * down. That config read is an MMIO to a dead link with no completion
-		 * (CmpltTO); it HANGS the CPU in the handler, the external tlmm26
-		 * watchdog is not fed for >1.5 s, and the board resets silently. Proven
-		 * by pstore-ftrace (aer_isr -> ... -> dw_pcie_rd_other_conf hanging).
-		 * pci=noaer disables AER; PME (another port service that walks config
-		 * on an error) can hang the same way, so pcie_ports=compat runs ALL port
-		 * services in compat mode - no handler touches the downed link. A runtime
-		 * SBR is not an option either (the root port's reset_subordinate returns
-		 * -ENOTTY - no bus-reset method), so recovery after a modem SSR is left to
-		 * wwand's recovery ladder (modem reset, then a board reboot as the top
-		 * rung). HW-tested 2026-10-29: a host-side re-bind of mhi-pci-generic, and
-		 * a PCI remove+rescan, both free a daemon wedged on the dead link but do
-		 * NOT clear an MHI SYSERR latch in the modem ("Failed to reset MHI due to
-		 * syserr state") - only a board reboot did.
+		 * The AER/PME hazard this board has, and where its mitigation now lives.
+		 *
+		 * The 5G modem on pcie1 crashes its link whenever it SSRs (poor RF, or a
+		 * D3hot power transition). The root port raises a PCIe AER interrupt, and
+		 * the AER service (aer_isr -> pci_walk_bus -> find_device_iter) reads the
+		 * config space of every device to find the source - including the modem,
+		 * whose link is now down. That read is an MMIO to a dead link with no
+		 * completion: it HANGS the CPU in the handler, the external tlmm26 watchdog
+		 * goes unfed for >1.5 s, and the board resets silently. Proven by
+		 * pstore-ftrace (aer_isr -> ... -> dw_pcie_rd_other_conf hanging). PME walks
+		 * config space on an error the same way.
+		 *
+		 * This used to be handled with "pci=noaer pcie_ports=compat" here, which
+		 * works but is a sledgehammer: it disables AER machine-wide and puts EVERY
+		 * port service on EVERY host into compat mode. Patch 0962 does it per host
+		 * instead - qcom_pcie_host_init() clears host->native_aer and
+		 * native_pme for the IPQ5018 cfg, before pci_host_probe() creates the
+		 * service devices - so AER and PME are never instantiated on these two
+		 * hosts while the rest of portdrv works normally.
+		 *
+		 * The arguments are therefore GONE from this line. What to check after a
+		 * flash, and what it means if it is wrong:
+		 *   - /sys/bus/pci_express/devices should now be non-empty (portdrv is
+		 *     active again, no longer in compat mode) and must contain NO entry
+		 *     ending in :aer or :pme.
+		 *   - the failure mode if 0962 does not hold is the silent reset above,
+		 *     which appears on the NEXT modem SSR and not necessarily at boot. A
+		 *     reboot with no panic record in pstore is the signature.
+		 *   - to revert: put " pci=noaer pcie_ports=compat" back on the line below.
+		 *
+		 * Unchanged by any of this: a runtime SBR is not available (the root port's
+		 * reset_subordinate returns -ENOTTY), and nothing here recovers the MODEM -
+		 * HW-tested 2026-10-29, a host-side re-bind of mhi-pci-generic and a PCI
+		 * remove+rescan both free a daemon wedged on the dead link but do NOT clear
+		 * an MHI SYSERR latch ("Failed to reset MHI due to syserr state"); only a
+		 * board reboot did. Patch 0963 is an untested attempt at that half.
 		 * See docs/qdm530/aer-hang.md.
 		 */
-		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M pci=noaer pcie_ports=compat";
+		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
 		stdout-path = "serial0:115200n8";
 	};
 
