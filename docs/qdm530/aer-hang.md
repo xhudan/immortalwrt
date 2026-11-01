@@ -92,13 +92,20 @@ rootfs and Quectel's out-of-tree `pcie_mhi`, which is what the vendor loads — 
 - `mhi_status_cb()` for `MHI_CB_SYS_ERROR`: only `pm_runtime_forbid()`. No recovery.
 - `mhi_pm_sys_err_worker()`: only `mhi_pm_disable_transition(MHI_PM_SYS_ERR_PROCESS)` — a
   teardown, not a recovery.
-- No `esoc` / `subsys_restart` power-cycle path in the driver, and no userspace script in
-  the vendor rootfs that resets, re-powers or "refreshes" the modem.
+- No `esoc` / `subsys_restart` power-cycle path in the driver.
 
-So there is no vendor trick to copy here, and swapping mainline's controller for Quectel's
-`pcie_mhi` would not change this outcome. Don't go looking again.
+Swapping mainline's controller for Quectel's `pcie_mhi` would not change this outcome:
+mainline carries the same primitives, `mhi_force_rddm_mode()` (with the identical
+"Triggering SYS_ERR to force RDDM state" string) and `mhi_soc_reset()`.
 
-### There is no modem power line on this board
+**Corrected 2026-11-01.** This section previously also claimed there was no userspace
+script that resets or re-powers the modem, and told the reader not to look again. Both
+were wrong. `/bin/Qlib` in the vendor CPE rootfs -- the `ubi_rootfs` volume of the UBI
+image, not the generic QSDK squashfs sitting beside it -- carries a global symbol
+`modem_status_task` whose control flow drives four GPIOs the DTB never mentions. See
+"The vendor does drive modem GPIOs" below.
+
+### There is no modem power line in the *device tree*
 
 Checked against the **vendor DTB**, extracted from the QSDK kernel volume of the NAND
 backup (`model = "Qualcomm Technologies, Inc. IPQ5018/AP-MP03.6-C1"`). Every GPIO the
@@ -108,7 +115,7 @@ vendor firmware drives:
 |---|---|---|
 | 13 | `gpios` (`gpio_keys/button@2`) | `wlan` button |
 | 15 | `perst-gpio` (`pci@a0000000`) | QCN9074 PERST |
-| **18** | **`perst-gpio` (`pci@80000000`)** | **modem PERST — the only modem control line** |
+| **18** | **`perst-gpio` (`pci@80000000`)** | **modem PERST** |
 | 24 | `device-power-gpio` (`usb3@8A00000`) | USB VBUS, not the modem |
 | 32 | `reset-gpio` | AW9523 RSTN |
 | 38 | `gpios` (`gpio_keys/button@1`) | `wps` button |
@@ -119,12 +126,59 @@ property, and there is no GPIO-controlled regulator anywhere in the vendor DTB.
 `device-power-gpio` sits in the USB3/DWC3 node, and this port disables USB anyway (the
 combo PHY is committed to PCIe).
 
-**This is why wwand's `reset_gpio` / `repower_time` cannot power-cycle the modem here.**
-Those options exist to hold a modem's power (or reset) line asserted for
-`repower_time` seconds — they need such a line to drive, and this board does not have
-one. `usb_repower` is a no-op on a PCIe/MHI modem for the same reason. The recovery
-ladder consequently has nothing between *"reset the modem over QMI"* (which needs a
-modem that still answers) and *"reboot the board"*.
+Two caveats on this table, both found on 2026-11-01. It was read off the
+`AP-MP03.6-C1` DTB, but the FIT embeds two board DTBs and its `configurations`
+default selects the other one (`config@sod` -> `AP-MP03.1`); a bootloader can also
+select or patch a DTB, so neither is proof of what actually booted. More importantly,
+**the absence of a modem power property in a DTB does not mean the board has no such
+line** -- the vendor drives four modem GPIOs from userspace with hard-coded numbers,
+which is exactly why they appear in no device tree. See the next section.
+
+Within the device tree, though, the modem's PCIe node does carry only `perst-gpio`:
+no power GPIO, no `supply` property, no GPIO-controlled regulator. That is why
+wwand's `reset_gpio` / `repower_time` found nothing to drive from a DT-derived board
+profile, and why `usb_repower` is a no-op on a PCIe/MHI modem. The ladder has nothing
+between *"reset the modem over QMI"* (which needs a modem that still answers) and
+*"reboot the board"* -- unless the userspace GPIOs below can be made to work.
+
+### The vendor does drive modem GPIOs, from userspace
+
+Established 2026-11-01 by disassembling `/bin/Qlib` out of the vendor CPE rootfs --
+the `ubi_rootfs` volume inside the UBI image, **not** the generic QSDK squashfs in the
+neighbouring partition, which is a different build entirely (QCA9984 firmware,
+`qmi_wwan_q`). Verified twice, independently.
+
+`modem_status_task` is a real global symbol (492 bytes). Inside its retry loop, after
+its PCI-enumeration check keeps failing, it calls two GPIO routines and only reaches
+`reboot` once the retry counter passes 5:
+
+    0x11238:  GPIO29 = 1, GPIO27 = 1, GPIO28 = 1
+    (sleep 3 s)
+    0x112a0:  GPIO27 = 0 -> 3 ms -> GPIO28 = 0 -> 70 ms
+              -> GPIO27 = 1 -> 800 ms -> GPIO27 = 0
+    (then re-export GPIO23 as an input and read it)
+
+GPIO23 is consumed as modem status by a routine a diagnostic names
+`get_modem_status`. The delay immediates are `movw`/`movt` pairs: 3000, 70000 and
+800000 microseconds.
+
+What this does **not** establish: that GPIO27 is PWRKEY, GPIO28 is RESET_N, or GPIO29
+switches power. The shape is a conventional Quectel power sequence -- an 800 ms pulse
+matches PWRKEY's >=500 ms requirement -- but the pin identities are inference, and
+nothing here proves the sequence recovers a wedged modem.
+
+A trap worth recording, because it produced a wrong conclusion first: these routines
+sit at addresses a disassembler labels `led_loop+0x4xx`, and the generic
+`/sys/class/gpio` helper strings genuinely do belong to LED code. `led_loop` is 880
+bytes and ends at `0x11150`; the GPIO routines start at `0x11238`. **The disassembler
+reuses the nearest surviving symbol for unnamed functions**, and string order in a
+stripped binary is not execution order. Both of those misled the first reading.
+
+On this port the four pins are unclaimed (the DTS takes 13, 15, 18, 26, 38) and the
+bootloader leaves them as outputs at `29=1, 27=0, 28=0` with `23` reading high --
+which is exactly the state the vendor's sequence ends in. Numbering differs: the
+vendor's 4.4 kernel based its gpiochip at 0, while this one bases at 512, so vendor
+`gpio27` is `539` in sysfs here.
 
 ### Three ways to recover the modem were tried on hardware. All three failed.
 
@@ -138,8 +192,9 @@ procedure; it is recorded so that nobody reads the three measured failures below
 final word, and so the attempt is not rediscovered from scratch.
 
 **1. Re-bind the PCIe host controller from the kernel ("Fix A").**
-PERST# (GPIO 18) is the only modem control line this board has -- there is no
-power line, see above -- and `pcie-qcom` drives it in
+PERST# (GPIO 18) is the only modem control line *in the device tree* -- see
+"The vendor does drive modem GPIOs" for the four the vendor drives from userspace
+instead -- and `pcie-qcom` drives it in
 `qcom_ep_reset_{assert,deassert}()` around its probe. No userspace path reaches
 it: the GPIO is claimed by the driver, `qcom-pcie` sets `suppress_bind_attrs` so
 `/sys/bus/platform/drivers/qcom-pcie/` has no `bind`/`unbind`, runtime PM is
@@ -276,7 +331,7 @@ That is correlation over one configuration change on one unit, though — a 20 d
 improvement plausibly reduces whatever RF condition precedes an SSR, but nothing here
 established the mechanism or that it removes the cause.
 
-### The vendor has no recovery for this in any of the paths inspected
+### The vendor has no *driver-level* recovery in the paths inspected
 
 Not a statement about the vendor stack as a whole — these are the paths that were read.
 Checked against the extracted QSDK rootfs, Quectel's out-of-tree `pcie_mhi`
