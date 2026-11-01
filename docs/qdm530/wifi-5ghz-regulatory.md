@@ -19,10 +19,9 @@ caldata.
 
 ## What it was NOT (eliminated, HW-tested)
 
-The chip reports `board_id 0xff` and `0:ART` reads all `0xFF`. That is consistent with no
-calibration being programmed there, though it is a read of one partition and one reported
-id, not a survey of the OTP. Either way it led to a long, wrong assumption that wide-channel
-5 GHz needed real vendor caldata. Every data/firmware experiment failed **and was beside the point**:
+The chip reports `board_id 0xff` and `0:ART` reads all `0xFF` — one partition and one
+reported id, consistent with no calibration being programmed there. That led to a long,
+wrong assumption that wide-channel 5 GHz needed real vendor caldata. Every data/firmware experiment failed **and was beside the point**:
 
 - Swapping `QCN9074-board.bin` to the vendor `bdwlan.*` variants — still 20 MHz.
 - Replacing `cal-pci-0000:01:00.0.bin` — `board_id` stays `0xff` (it comes from chip OTP
@@ -38,8 +37,9 @@ id, not a survey of the OTP. Either way it led to a long, wrong assumption that 
 `ath11k` registers the QCN9074 phy as **self-managed** (`REGULATORY_WIPHY_SELF_MANAGED`):
 cfg80211's global regdomain does not drive it — the **firmware** does, from the country
 code `ath11k` sends it (`current_cc_support=false` → the `init_country` path). With a
-blank OTP the firmware has no regpair of its own, so the country code is the *only* input
-that selects a regulatory domain:
+no regpair of its own in the OTP, the country code is what selects a regulatory domain
+here. Whether it is the firmware's only such input was not established — what was measured
+is that changing it changed the available width:
 
 | country sent | firmware regdomain | 5 GHz result |
 |---|---|---|

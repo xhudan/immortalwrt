@@ -87,12 +87,12 @@ mtd4  0:QSEE        mtd9  0:CDT_1       mtd14 0:TRAINING
 | Ethernet lan1 (1 G) | ✅ | IPQ5018 internal GE PHY |
 | Ethernet lan2 (2.5 G) | ✅ | RTL8221B; native 2.5G peer + 1G rate-matching + hot-plug |
 | Wi-Fi 2.4 GHz | ✅ | `ath11k`, broadcasting |
-| Wi-Fi 5 GHz | ✅ | QCN9074 at **160 MHz** (ch36 / HE160, 23 dBm — matches vendor), seeded via an ieee80211 hotplug when unset. `board_id` reads 0xff (no caldata), but the width is governed by the regulatory **country**, not caldata: `country=CN` unlocks the full band; `ID`/world collapsed it to 20 MHz. Non-DFS alt: ch149 / HE80 (33 dBm). See `wifi-5ghz-regulatory.md` |
+| Wi-Fi 5 GHz | ✅ | QCN9074 at **160 MHz** (ch36 / HE160, 23 dBm — matches vendor), seeded via an ieee80211 hotplug when unset. `board_id` reads 0xff and `0:ART` is all 0xFF; what was measured is that the regulatory **country** governs the available width on this firmware — `country=CN` gave the wider channels where `ID`/world gave 20 MHz. Non-DFS alt: ch149 / HE80 (33 dBm). See `wifi-5ghz-regulatory.md` |
 | Modem WAN — PCIe1/MHI | ✅ | RG520N-EB `17cb:0308`; link trains, WAN auto-seeded + dialed by wwand over QMI-over-QRTR (rmnet/QMAP), IPv4 + IPv6 dual-stack (endpoint/QMAP auto-derived). Sustained-DL stable in testing: the IP_HW0 ring is 512 and `mhi_net` refills it in-line (patches 0958/0959), which replenishes at the rate the device drains rather than guaranteeing the ring never empties — see `downlink-stall.md` |
 | Modem — USB | ❌ | USB host disabled: the combo PCIe/USB3 PHY is given to pcie1, and dwc3 as configured here did not come up without the SS PHY (a USB2-only setup was never attempted) — so no USB AT/DIAG ports |
 | Front-panel LEDs | ✅ | 4 RGB LEDs on the AW9523B via `leds-aw9523` (`/sys/class/leds`): power, wan (netdev), mobile/signal + status (daemon). See `leds.md` |
 | Watchdog | ✅ | external GPIO WDT on tlmm 26 fed via `gpio-watchdog` |
-| Thermal (tsens) | ➖ N/A | no tsens calibration fuses on this board (the vendor's tsens calibration failed too) — disabled; on mainline the uncalibrated probe also Oopses (`__init`-after-free) |
+| Thermal (tsens) | ➖ off | `&tsens` disabled. The probe Oopsed (`__init`-after-free), which patch 0964 fixes; it stays off because nothing here has established the calibration data is readable — the vendor firmware logged `tsens calibration failed`, which is not a reading of the OTP. See *Open issues* |
 
 ## Modem
 

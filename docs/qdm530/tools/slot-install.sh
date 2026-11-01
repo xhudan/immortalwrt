@@ -41,13 +41,26 @@ mtd_num_of() {   # $1 = partition label as printed in /proc/mtd (without quotes)
 	grep -i "\"$1\"" /proc/mtd | sed -n 's/^mtd\([0-9][0-9]*\):.*/\1/p' | head -1
 }
 
-# One installer at a time. Two of these - or one of these plus a bootslot switch - racing
-# over the same slot and the same BOOTCONFIG is how you get a half-written slot pointed at
-# by a half-written descriptor.
-LOCKDIR=/tmp/qdm530-slot-install.lock
-mkdir "$LOCKDIR" 2>/dev/null || die "another slot install/switch appears to be running ($LOCKDIR)"
-trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
+# One destructive slot operation at a time, using the SAME lock bootslot takes - an
+# earlier version used a private lock and claimed it protected against a concurrent
+# `bootslot switch`, which it did not.
+#
+# Consequence: bootslot is non-reentrant on this lock, so this script must not shell out
+# to it while holding it. It does not - it writes BOOTCONFIG itself below. restore-vendor.sh
+# DOES call bootslot, so it deliberately does not take this lock and is therefore not
+# serialised against this script; not running both at once is on the operator.
+LOCKDIR=/tmp/bootslot.lock
+mkdir "$LOCKDIR" 2>/dev/null || die "a slot install or bootslot run is already in progress ($LOCKDIR); if you are certain none is, inspect and remove it by hand"
+TMPD=$(mktemp -d /tmp/slot-install.XXXXXX) || die "cannot create a temporary directory"
+trap 'rm -rf "$TMPD" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null' EXIT
 trap 'echo "slot-install: interrupted" >&2; exit 130' INT TERM HUP
+
+# Everything this needs, checked BEFORE anything is destroyed - fw_setenv above all:
+# without it the auto-sync cannot be cleared, and finding that out after the other slot has
+# been formatted is finding out too late.
+for t in fw_setenv fw_printenv ubiformat ubiattach ubinfo mtd md5sum cmp; do
+	command -v "$t" >/dev/null 2>&1 || die "missing required tool: $t (refusing to start)"
+done
 
 # ---- 1. detect the inactive A/B slot from /proc/boot_info ----
 cur=$(cat /proc/boot_info/rootfs/primaryboot)                 # 0 or 1
@@ -141,19 +154,42 @@ read ans
 
 log "writing primaryboot=$new via the kernel's BOOTCONFIG serializer (never hand-edited)"
 echo "$new" > /proc/boot_info/rootfs/primaryboot \
-	|| die "writing primaryboot failed - nothing flipped"
+	|| die "writing primaryboot failed - no flash write happened"
 cat /proc/boot_info/getbinary_bootconfig  > /tmp/bc0.bin \
 	|| die "reading getbinary_bootconfig failed - nothing flipped"
 cat /proc/boot_info/getbinary_bootconfig1 > /tmp/bc1.bin \
 	|| die "reading getbinary_bootconfig1 failed - nothing flipped"
-# A serializer emitting a valid struct says nothing about whether the read was complete.
-[ -s /tmp/bc0.bin ] && [ -s /tmp/bc1.bin ] || die "serialized BOOTCONFIG is empty - nothing flipped"
+# "Not empty" accepts a one-byte record, and the read-back would then faithfully confirm
+# that a truncated source had been written. Check length, magic, and that the selector we
+# came to set is actually in there.
+BC_LEN=336
+for f in /tmp/bc0.bin /tmp/bc1.bin; do
+	n=$(wc -c < "$f")
+	[ "$n" = "$BC_LEN" ] || die "serialized $f is $n bytes, expected $BC_LEN - no flash write"
+	[ "$(dd if="$f" bs=1 count=4 2>/dev/null | md5sum | cut -d' ' -f1)" \
+		= e8370991fc78834b93667db716d19df7 ] \
+		|| die "serialized $f lacks the BOOTCONFIG magic - no flash write"
+done
+want_md5=93b885adfe0da089cdf634904fd59f71
+[ "$new" = 1 ] && want_md5=55a54008ad1ba589aa210d2629c1df41
+[ "$(dd if=/tmp/bc0.bin bs=1 skip=128 count=1 2>/dev/null | md5sum | cut -d' ' -f1)" \
+	= "$want_md5" ] || die "serialized record does not carry primaryboot=$new - no flash write"
+cmp -s /tmp/bc0.bin /tmp/bc1.bin \
+	|| die "the two serialized copies differ - refusing to write an inconsistent pair"
 
 # Verify each write over the WHOLE record, not by its magic. Two partitions cannot be
 # written atomically from here: if the second fails, the copies disagree, and the only
 # honest thing to do is say so and refuse to reboot.
-verify_bc(){ [ "$(md5sum < "$1" | cut -d' ' -f1)" = \
-	"$(dd if="$2" bs=1 count=$(wc -c < "$1") 2>/dev/null | md5sum | cut -d' ' -f1)" ]; }
+# Read back into a file, checking dd itself, then compare bytes. Comparing two command
+# substitutions would report a match when BOTH hash commands failed and returned "".
+verify_bc(){
+	rb="$TMPD/readback.bin"
+	dd if="$2" of="$rb" bs=1 count="$(wc -c < "$1")" 2>/dev/null \
+		|| { echo "slot-install: read-back from $2 failed" >&2; return 1; }
+	[ "$(wc -c < "$rb")" = "$(wc -c < "$1")" ] \
+		|| { echo "slot-install: short read-back from $2" >&2; return 1; }
+	cmp -s "$1" "$rb"
+}
 
 mtd write /tmp/bc0.bin "/dev/mtd$bc0_mtd" || die "mtd write BOOTCONFIG failed"
 verify_bc /tmp/bc0.bin "/dev/mtd$bc0_mtd" \
@@ -172,18 +208,23 @@ verify_bc /tmp/bc1.bin "/dev/mtd$bc1_mtd" \
 # overwrite it. Clearing both auto-sync flags here preserves the inactive slot, giving a
 # real dual-boot. HW-verified on this board. (sys_upgrade/sys_recovery live in 0:appsblenv,
 # not the rootfs slots.)
-if command -v fw_setenv >/dev/null 2>&1; then
-	# Checked, because "preserves the vendor backup" is a promise this makes to the
-	# operator - and an unchecked fw_setenv turns it into a guess.
-	if fw_setenv sys_upgrade 0 && fw_setenv sys_recovery 0; then
-		log "cleared sys_upgrade/sys_recovery env (keep the other slot as a backup)"
-	else
-		log "WARNING: clearing sys_upgrade/sys_recovery FAILED - the bootloader's"
-		log "WARNING: auto-sync may overwrite the slot you are leaving. The flip itself"
-		log "WARNING: is already written; decide whether to continue before rebooting."
-	fi
+# A warning followed by an automatic reboot is not a choice, which is what an earlier
+# version of this did. Any failure here stops with the flip already written, and leaves the
+# decision to a human who can read the message.
+if fw_setenv sys_upgrade 0 && fw_setenv sys_recovery 0 \
+	&& [ "$(fw_printenv -n sys_upgrade 2>/dev/null)" = "0" ] \
+	&& [ "$(fw_printenv -n sys_recovery 2>/dev/null)" = "0" ]; then
+	log "cleared sys_upgrade/sys_recovery env (keep the other slot as a backup)"
 else
-	log "WARNING: fw_setenv not found — the inactive slot may be overwritten by the bootloader auto-sync"
+	echo "" >&2
+	echo "slot-install: FAILED to clear sys_upgrade/sys_recovery." >&2
+	echo "slot-install: BOOTCONFIG is already flipped to mtd$inact, so the next boot uses" >&2
+	echo "slot-install: the new slot - but the bootloader's auto-sync may then MIRROR it" >&2
+	echo "slot-install: over mtd$act and destroy the firmware you are leaving behind." >&2
+	echo "" >&2
+	echo "slot-install: NOT rebooting. Either fix the environment and run the two fw_setenv" >&2
+	echo "slot-install: commands by hand, or accept losing the other slot and reboot yourself." >&2
+	exit 1
 fi
 
 log "BOOTCONFIG updated. The board will boot mtd$inact next."

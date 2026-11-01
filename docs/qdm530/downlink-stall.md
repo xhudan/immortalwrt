@@ -61,13 +61,14 @@ versus `rp` in debugfs), the stall, and that enlarging the ring plus refilling i
 removes it. The explanation usually given for it — that the SDX6x hardware DL path (IPA)
 deadlocks on descriptor starvation and that the modem firmware has no internal watchdog
 to recover it — is a plausible reading of those observations, not something measured from
-the modem side. It is written here as the working hypothesis it is, because the fix stands
-on the host-side behaviour either way, and an earlier version of this document asserted the
-internal timeline as fact (down to the refill arriving "milliseconds too late").
+the modem side. It is written here as the working hypothesis it is; the fix stands on the
+host-side behaviour either way.
 
-The debugfs picture now makes sense: `wp > rp` + `db` rung is the kworker's refill
-arriving a few ms **too late** — after the IPA had already halted. `rp` frozen and
-IRQ 45 silent are the halted engine, not an ignored buffer.
+What the debugfs snapshot shows: `wp > rp` with the doorbell rung, `rp` frozen, and
+IRQ 45 silent. That is a ring with buffers posted that the device is not consuming. It
+fits a refill that arrived after the device had already stopped, which is the reading
+above — but the snapshot is a single sample after the fact and does not time the two
+events against each other.
 
 Corroboration: the earlier `mru=32768` experiment *reduced* (but didn't cure) the
 stall — bigger buffers make the 128-slot ring hold more bytes, so it drains slower.
@@ -103,9 +104,10 @@ Ring size alone narrows the window; the in-line refill narrows it much further, 
 does **not** close it: an allocation failure still falls back to the work, and a device
 can still outrun the host. Both together are belt-and-braces, not a guarantee.
 
-**One more patch belongs to this story — reviewed, not soaked.** Everything above was
-measured on hardware; what follows was found by review and has never been exercised.
-`0966-net-mhi_net-no-refill-once-device-is-down.patch` closes a hole the in-line refill
+**One more patch belongs to this story — reviewed, not soaked.** The results above were
+measured on hardware (the mechanism they are explained by was not, see the root-cause
+section); what follows was found by review and has never been exercised at all.
+`0966-net-mhi_net-no-refill-once-device-is-down.patch` narrows a hole the in-line refill
 opened. `mhi_ndo_stop()` cancels the refill work, but a DL completion arriving after
 that cancellation can re-arm it — and with the in-line path it can also queue a buffer
 directly. The buffer is harmless: `mhi_gen_tre()` checks

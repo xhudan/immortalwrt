@@ -58,6 +58,16 @@ case "$act" in
 esac
 [ "$inact" != "$act" ] || die "inactive slot resolved to the active mtd ($act) — refusing"
 
+# Check the scratch device is free BEFORE ubiformat destroys the inactive slot, not after.
+[ -d /sys/class/ubi/ubi9 ] && die "ubi9 is already attached - free it before starting"
+
+# Detach only an attachment this run created; an interrupted earlier run must not have its
+# leftovers silently adopted or destroyed by this one.
+OUR_UBI9=0
+cleanup_ubi9(){ [ "$OUR_UBI9" = 1 ] && ubidetach -d 9 2>/dev/null; OUR_UBI9=0; }
+trap 'cleanup_ubi9' EXIT
+trap 'echo "restore-vendor: interrupted" >&2; cleanup_ubi9; exit 130' INT TERM HUP
+
 log "running (ImmortalWrt, KEPT) rootfs = mtd$act"
 log "==> vendor will be written to the INACTIVE slot = /dev/mtd$inact"
 log "    (to put vendor in the other physical slot: bootslot switch + reboot first, then re-run)"
@@ -83,9 +93,12 @@ ubiformat "/dev/mtd$inact" -f "$IMG" -y || die "ubiformat failed"
 
 # ---- verify it really is the vendor firmware (by UBI volume names) ----
 log "verifying the written slot holds vendor volumes..."
-# An existing ubi9 belongs to someone else; refuse rather than detach it blind.
+# Attach the scratch device, recording that WE created it so cleanup only detaches our
+# own attachment. The availability of ubi9 was already checked before formatting (above) -
+# discovering it is occupied here would be discovering it after the slot is gone.
 [ -d /sys/class/ubi/ubi9 ] && die "ubi9 is already attached - refusing to use it as scratch"
 ubiattach -m "$inact" -d 9 >/dev/null 2>&1 || die "ubiattach failed on mtd$inact — written image is not a valid UBI"
+OUR_UBI9=1
 vols=$(ubinfo -a -d 9 2>/dev/null | sed -n 's/^Name:[[:space:]]*//p' | tr '\n' ' ')
 ubidetach -d 9 2>/dev/null
 log "volumes: $vols"

@@ -129,16 +129,22 @@ the other rootfs slot holds).
   is that one specific wrong state was recovered that way (`0:HLOS=1` → `bad offset of hlos`
   → fallback, see above). A malformed descriptor the bootloader reacts to differently has
   not been tried, and "no checksum in the struct" says nothing about what other validation
-  the bootloader does. A **wrong-offset** NAND erase/write is not recoverable at all — only
-  write the two BOOTCONFIG mtds, by label (never hardcode mtd numbers blindly; confirm with
-  `/proc/mtd`).
+  the bootloader does. A **wrong-offset** NAND erase/write is the case to fear most, because
+  it can destroy the recovery path itself — SBL1, MIBIB or APPSBL gone means U-Boot is gone,
+  and with it the way back in. Only write the two BOOTCONFIG mtds, by label (never hardcode
+  mtd numbers blindly; confirm with `/proc/mtd`).
 
 - **This descriptor selects more than the rootfs slot.** It carries selectors for
   `0:QSEE`, `0:DEVCFG`, `0:CDT`, `0:APPSBL` and `0:HLOS` as well, so restoring a "clean"
   struct with every selector zeroed sets all of those, not just the one you came to fix. A
-  sibling board's dump is only the right content if its partition layout and the contents of
-  those partitions match this board's — check `/proc/mtd` on both before using one, and
-  prefer this board's own backup where you have it.
+  donor descriptor is not automatically unsuitable, but check that its format and partition
+  naming match this board and that every selector names an appropriate copy of the target's
+  installed partitions. Matching `/proc/mtd` layouts does not establish that by itself, and
+  how each boot stage honours each selector has not been verified here.
+
+  Prefer a validated backup from this board — strongest provenance, not an unconditional
+  guarantee: an old own-board dump can describe a selection that no longer matches what is
+  installed.
 
 - **The verification steps below print; they do not enforce.** They also read the first copy
   only, and several of them hardcode `mtd2`/`mtd3` despite the warning above. Read the output

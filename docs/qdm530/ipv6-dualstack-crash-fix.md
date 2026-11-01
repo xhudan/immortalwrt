@@ -79,7 +79,7 @@ Net behaviour per carrier:
 | carrier | first connect | steady state |
 |---|---|---|
 | Smartfren (refuses v6) | 1 refusal + 1 modem crash | **stable IPv4**, v6 no longer attempted |
-| XL (grants v6) | v6 succeeds, resets the counter | **dual-stack**, never pins |
+| XL (grants v6) | v6 succeeds, resets the counter | **dual-stack** across the test period; two consecutive failures would pin it like any carrier |
 
 A SIM swap / reboot / `ifdown`+`ifup` rebuilds state and re-probes v6 once.
 
