@@ -14,6 +14,14 @@ profiles in this file). Match that: 512 x 16-byte TRE = 8 KiB of ring, trivial
 DMA memory, 4x more headroom for the host to keep the ring fed. The dedicated
 HW DL event ring (2048) already satisfies the "event >= 2x channel" rule.
 
+Two limits on the evidence. The hardware test that cleared the stall ran this
+together with the in-line refill change, so it measures the PAIR; this patch
+alone has not been shown to be sufficient or necessary. And modem_qcom_v1 is a
+SHARED profile - every modem matched to it gets the larger rings, not just the
+RG520N-EB this was measured on - so the justification has to be the generic
+one above (vendor driver and other mainline SDX6x profiles already use 512),
+not the single board.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/bus/mhi/host/pci_generic.c

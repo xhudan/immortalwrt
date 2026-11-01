@@ -10,10 +10,12 @@ worker - so the ring hits empty. A hardware-accelerated modem DL engine
 never resumes: rx freezes, tx keeps flowing, link stays up, only a modem reset
 recovers it.
 
-Every other high-rate Linux NIC refills its RX ring in-line from the receive
-path, not from a workqueue. Do the same: for each buffer the device just
-consumed, hand one back immediately from the DL callback so the ring never runs
-dry. This is safe - the MHI host drops mhi_chan->lock around the transfer
+Refill in-line from the receive path instead: for each buffer the device just
+consumed, hand one back immediately from the DL callback, so a drain no longer
+waits on system_wq to be scheduled. This does not guarantee the ring never
+empties - an allocation can still fail and the fallback work can still be
+needed - it removes the scheduling latency that made emptying the normal
+outcome under sustained downlink. This is safe - the MHI host drops mhi_chan->lock around the transfer
 callback (parse_xfer_event) and the callback runs in softirq, so
 netdev_alloc_skb()/mhi_queue_skb() can be called directly. The delayed work is
 kept as the fallback for the rare allocation/queue failure, as the vendor
