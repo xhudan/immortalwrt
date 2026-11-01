@@ -16,9 +16,11 @@ hard-won parts are not re-derived.
   `perst-gpios` on GPIO18 was set `GPIO_ACTIVE_HIGH`, which made
   `qcom_perst_assert(..., false)` (deassert, gpiod value 0) drive the pin
   **physically LOW** = PERST# asserted = the modem PCIe endpoint held in reset
-  forever. The host then just cycled in Detect (LTSSM `DETECT_QUIET`) with no
-  receiver. The fix is one line: **`GPIO_ACTIVE_LOW`** (standard PCIe; deassert →
-  physical HIGH → endpoint released), matching the Cudy P5.
+  forever. The host sat in Detect (LTSSM `DETECT_QUIET`) with no receiver — which is
+  consistent with an endpoint held in reset, though on its own it only says no receiver
+  was detected, and plenty of things produce that. The evidence that it was PERST#
+  polarity is the fix: **`GPIO_ACTIVE_LOW`** (standard PCIe; deassert → physical HIGH →
+  endpoint released), matching the Cudy P5, after which the link trained.
 - IPQ5018 has **two** PCIe controllers: `pcie0` @`a0000000` (2-lane, PHY @`0x86000`,
   the QCN9074 5 GHz Wi-Fi) and `pcie1` @`0x80000000` (1-lane, PHY @`0x7e000`, the
   modem). Both train.
@@ -63,7 +65,9 @@ appear and may need a power-cycle to leave PBL — not the case for this board.
    PCIe0 PHY   86000  ------------------------ pcie0 (2-lane, dedicated)      (QCN9074 WiFi)
 ```
 
-- `pcie0`'s PHY (`0x86000`) is **dedicated** → always alive.
+- `pcie0`'s PHY (`0x86000`) is **dedicated** — nothing else contends for it, so the mux
+  problem below does not apply to it. "Dedicated" says nothing about power or clock
+  state, only that it is not shared.
 - `pcie1`'s PHY (`0x7e000`) is the **combo** PHY, muxed with USB3. Whoever the TCSR
   mux (`0x10540` bit0) points at owns it. The mainline USB-SS driver
   (`phy-qcom-uniphy-usb-ss-22ull.c`) calls `qcom_uniphy_usb_mux_select(uniphy, true)`

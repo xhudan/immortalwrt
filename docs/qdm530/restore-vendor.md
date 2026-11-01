@@ -16,7 +16,11 @@ pointer to it with `bootslot`.
 ## What you need
 
 - The board running **ImmortalWrt with the `bootslot` command** (a current image). Check
-  with `bootslot status`; if "not found", flash a current ImmortalWrt first.
+  with `bootslot status`. If it is missing, copy it over from this repo
+  (`docs/qdm530/tools/` has no copy; the script lives at
+  `target/linux/qualcommax/ipq50xx/base-files/usr/sbin/bootslot`) rather than flashing
+  another firmware just to obtain a helper — a flash is the operation you are trying to
+  recover from.
 - A **vendor rootfs image** = a raw `dd` dump of the vendor `rootfs` mtd partition, e.g.
   `mtd15.bin` from an MTD backup taken while the board still ran the vendor firmware. It
   is a UBI image (starts with `UBI#`) carrying the vendor volumes `kernel`, `wifi_fw`,
@@ -98,9 +102,13 @@ bootslot inspect     # confirm "other slot ... contents: OTHER-OS"
                      # (`status` is read-only now and does not attach UBI; `inspect` does.
                      #  OTHER-OS is a volume-name heuristic, not positive proof it is the
                      #  vendor firmware, and not proof that it boots)
-bootslot switch
+bootslot switch && bootslot status   # status must report the two copies agreeing
+# only then, as a SEPARATE command:
 reboot
 ```
+
+`bootslot switch` can fail after writing one copy and will say `Do NOT reboot`. Pasting it
+together with `reboot` defeats that, which on this board costs a UART session at best.
 
 ## Going back to ImmortalWrt later
 

@@ -41,10 +41,28 @@ mtd_num_of() {   # $1 = partition label as printed in /proc/mtd (without quotes)
 	grep -i "\"$1\"" /proc/mtd | sed -n 's/^mtd\([0-9][0-9]*\):.*/\1/p' | head -1
 }
 
+# One installer at a time. Two of these - or one of these plus a bootslot switch - racing
+# over the same slot and the same BOOTCONFIG is how you get a half-written slot pointed at
+# by a half-written descriptor.
+LOCKDIR=/tmp/qdm530-slot-install.lock
+mkdir "$LOCKDIR" 2>/dev/null || die "another slot install/switch appears to be running ($LOCKDIR)"
+trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
+trap 'echo "slot-install: interrupted" >&2; exit 130' INT TERM HUP
+
 # ---- 1. detect the inactive A/B slot from /proc/boot_info ----
 cur=$(cat /proc/boot_info/rootfs/primaryboot)                 # 0 or 1
 other=$(cat /proc/boot_info/rootfs/upgradepartition)          # QSDK's own name for the inactive slot, e.g. rootfs_1
 [ -n "$cur" ] && [ -n "$other" ] || die "could not read primaryboot/upgradepartition from /proc/boot_info"
+# "nonempty" is not validation: this decides which slot gets formatted, so require the
+# values to be the ones this layout can actually produce.
+case "$cur" in
+	0|1) ;;
+	*) die "primaryboot reads '$cur' - expected 0 or 1; refusing to guess a slot" ;;
+esac
+case "$other" in
+	rootfs|rootfs_1) ;;
+	*) die "upgradepartition reads '$other' - expected rootfs or rootfs_1; refusing" ;;
+esac
 inact=$(mtd_num_of "$other")
 [ -n "$inact" ] || die "could not find the \"$other\" partition in /proc/mtd"
 new=$(( 1 - cur ))

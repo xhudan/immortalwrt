@@ -49,7 +49,13 @@ a_mtd=$(mtd_num_of "rootfs"); b_mtd=$(mtd_num_of "rootfs_1")
 act=$(cat /sys/class/ubi/ubi0/mtd_num 2>/dev/null)
 [ -n "$act" ] || act=$(dmesg 2>/dev/null | sed -n 's/.*ubi0: attached mtd\([0-9][0-9]*\).*/\1/p' | tail -1)
 [ -n "$act" ] || die "could not determine the running rootfs mtd (ubi0)"
-if [ "$a_mtd" = "$act" ]; then inact=$b_mtd; else inact=$a_mtd; fi
+# Do not fall back to "then it must be rootfs" for an active mtd that is neither of the
+# pair - that nominates a slot with no relation to what is actually running.
+case "$act" in
+	"$a_mtd") inact=$b_mtd ;;
+	"$b_mtd") inact=$a_mtd ;;
+	*) die "running rootfs is mtd$act, neither rootfs (mtd$a_mtd) nor rootfs_1 (mtd$b_mtd) — refusing" ;;
+esac
 [ "$inact" != "$act" ] || die "inactive slot resolved to the active mtd ($act) — refusing"
 
 log "running (ImmortalWrt, KEPT) rootfs = mtd$act"
