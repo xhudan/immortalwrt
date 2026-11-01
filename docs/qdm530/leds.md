@@ -1,6 +1,7 @@
 # QDM530 front-panel LEDs
 
-The board has **four front-panel RGB LEDs** driven by an **Awinic AW9523B** 16-channel
+The board has **four front-panel LEDs** — three full RGB and one green/blue — driven by an
+**Awinic AW9523B** 16-channel
 I2C GPIO/LED expander (`0x5b` on `blsp1_i2c3` / `0x78b7000`). This note records how they
 are wired, why they need a dedicated driver, the channel→LED→colour map found on the
 hardware, and how each LED is driven.
@@ -19,7 +20,10 @@ triggers (`netdev`, `timer`, `default-on`, the boot/running/failsafe/upgrade ali
 
 `pinctrl-aw9523` **requires** a `reset-gpios` and pulses RSTN (tlmm 32) at probe. On this
 board that pulse wedged the QUP I2C controller — `i2c_qup 78b7000.i2c: flush timed out` —
-and the ~7 s stall even raced the NAND/UBI rootfs probe (`cannot open mtd rootfs` → hang).
+and a NAND/UBI rootfs failure (`cannot open mtd rootfs` → hang) was seen alongside the ~7 s
+stall. The two co-occurred; that the stall *caused* the rootfs failure was never established,
+and there is a separate, independently diagnosed boot race in the NAND driver (patch 0955)
+that produces the same symptom.
 Left at its power-on level the chip answers I2C fine. So **leds-aw9523 does not touch the
 RSTN GPIO at all** — it only soft-resets over I2C (SOFT_RESET register) — and the DT node
 carries no `reset-gpios`. That one decision is what makes the probe reliable.
@@ -39,8 +43,9 @@ the panel. LEDs are numbered from the power button inward.
 
 Notes:
 - #1–#3 are full RGB; **#4 has no red channel** (green + blue only).
-- LED3's red (reg 3) is noticeably dimmer than the other channels (a board resistor
-  choice), so "medium signal" leans orange rather than pure amber.
+- LED3's red (reg 3) is noticeably dimmer than the other channels, so "medium signal" leans
+  orange rather than pure amber. The cause was not investigated — a different series
+  resistor is the obvious guess, but nothing here measured it.
 - DIM channels `4,5,6,9,12` (regs `0x24,0x25,0x26,0x29,0x2c`) drive nothing — unused pins.
 
 ## Function, colour and behaviour
@@ -48,7 +53,7 @@ Notes:
 | LED | meaning | driven by | states |
 |-----|---------|-----------|--------|
 | **#1 power** | system power / health | DT `led-*` aliases | green solid = running; green blink = boot; red = failsafe; red blink = upgrade |
-| **#2 wan** | internet / data link | `netdev` trigger on `wwand0` | green = link up, blinks on tx/rx |
+| **#2 wan** | WAN link / activity | `netdev` trigger on `wwand0` | green = link up, blinks on tx/rx. A netdev trigger follows the interface, not reachability: it stays lit on a bearer that carries no traffic |
 | **#3 mobile** | cellular signal strength | `qdm530-modem-leds` daemon (RSRP) | green ≥ −95 dBm; orange −95…−110; red < −110; off = no reading |
 | **#4 status** | data-connection state | `qdm530-modem-leds` daemon | green = wan CONNECTED; blue = registered / connecting; off = no service |
 

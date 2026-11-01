@@ -21,6 +21,14 @@ PORT="$1"; BAUD="${2:-115200}"
 
 # --- auto-detect the serial device ---
 if [ -z "$PORT" ]; then
+	# Catch mode floods the port with a password and can sit on it for a long time, so it
+	# must not guess which serial device that is - two adapters plugged in is normal.
+	if [ "$CATCH" = 1 ]; then
+		echo "catch mode needs the port named explicitly, e.g. $0 -c /dev/ttyUSB0" >&2
+		echo "candidates, newest first:" >&2
+		ls -t /dev/ttyUSB* /dev/ttyACM* 2>/dev/null | sed 's/^/  /' >&2
+		exit 1
+	fi
 	PORT=$(ls -t /dev/ttyUSB* /dev/ttyACM* 2>/dev/null | head -1)
 fi
 [ -n "$PORT" ] && [ -e "$PORT" ] || {
@@ -42,13 +50,18 @@ if [ "$CATCH" = 1 ]; then
 	echo ">> CATCH mode — flooding 'quectel' to break into U-Boot."
 	echo ">> Now POWER-CYCLE the board. The flood retries on every reset (good for bootloops)."
 	echo ">> When you see the U-Boot prompt (=> or #), press ENTER here to go interactive."
-	stty -F "$PORT" "$BAUD" cs8 -cstopb -parenb -icrnl raw -echo 2>/dev/null
+	stty -F "$PORT" "$BAUD" cs8 -cstopb -parenb -icrnl raw -echo \
+		|| { echo "stty failed on $PORT - wrong device, or not a tty" >&2; exit 1; }
 	cat "$PORT" & RD=$!
 	( while :; do printf 'quectel\r' > "$PORT"; sleep 0.25; done ) & FL=$!
-	trap 'kill $FL $RD 2>/dev/null' INT
+	# Both children write to / read from the port; leaving either behind means the
+	# interactive console that follows fights an invisible flooder for the same tty.
+	# INT alone was not enough - a TERM or a hangup left them running.
+	cleanup_children() { kill "$FL" "$RD" 2>/dev/null; wait "$FL" "$RD" 2>/dev/null; }
+	trap 'cleanup_children; exit 130' INT TERM HUP
 	read _
-	kill $FL $RD 2>/dev/null
-	trap - INT
+	cleanup_children
+	trap - INT TERM HUP
 	# let the tty settle before the terminal re-opens it
 	sleep 1
 	echo ">> handing over to the interactive console ($TERMCMD)"

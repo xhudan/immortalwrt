@@ -115,7 +115,9 @@ ssh root@192.168.1.1 '
   done'
 ```
 
-or, if the image has it, `bootslot status` (name-resolves `rootfs`/`0:HLOS` and shows what
+or, if the image has it, `bootslot status` (reports the flag and whether the two copies
+agree; note it reads a **fixed offset**, it does not name-resolve `rootfs`/`0:HLOS` inside the
+descriptor, and `bootslot inspect` is what shows what
 the other rootfs slot holds).
 
 ## Safety / recovery

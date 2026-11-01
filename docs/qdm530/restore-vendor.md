@@ -46,22 +46,34 @@ bootslot status
 Runs on the board. Modes mirror `slot-install.sh`:
 
 ```sh
-# 1. copy the vendor dump to the board (from your PC):
+# 1. copy the dump AND the script to the board (from your PC) — an earlier version of
+#    this block forgot the script, which is in this repo, not on the board:
 ssh root@192.168.1.1 'cat > /tmp/vendor-rootfs.bin' < mtd15.bin
+ssh root@192.168.1.1 'cat > /tmp/restore-vendor.sh'  < docs/qdm530/tools/restore-vendor.sh
 
 # 2. on the board — read-only check of the slot layout:
 sh /tmp/restore-vendor.sh detect
 
-# 3. write the inactive slot + verify vendor volumes, WITHOUT flipping yet:
-sh /tmp/restore-vendor.sh stage /tmp/vendor-rootfs.bin <md5-optional>
+# 3. write the inactive slot + verify vendor volumes, WITHOUT flipping yet.
+#    The md5 argument is optional; if you pass one it is the dump's md5. Do NOT type the
+#    angle brackets — in a shell they are redirection:
+sh /tmp/restore-vendor.sh stage /tmp/vendor-rootfs.bin 2f3a...   # or omit the md5
 
-# 4. full run: stage + verify + confirm (type YES) + flip to vendor + reboot:
-sh /tmp/restore-vendor.sh /tmp/vendor-rootfs.bin <md5-optional>
+# 4. flip and reboot. NOTE: running the full command after step 3 formats and writes the
+#    slot a SECOND time — step 3 is a dry run of the write, not a stage it reuses. Either
+#    do step 3 alone and then flip manually, or skip straight to this:
+sh /tmp/restore-vendor.sh /tmp/vendor-rootfs.bin 2f3a...         # or omit the md5
 ```
 
 The script finds the inactive slot by partition name + which mtd `ubi0` is on (robust to
-any mtd numbering), refuses to write/flip unless the image is a UBI with a `ubi_rootfs`
-volume, and only flips after you type `YES`. It flips with `bootslot switch`.
+any mtd numbering), and only flips after you type `YES`. It flips with `bootslot switch`.
+
+**What it does not do, despite an earlier claim here.** It does *not* refuse to write unless
+the image is a UBI with a `ubi_rootfs` volume: that check happens **after** `ubiformat` has
+already written the slot, so it can tell you the result was wrong but cannot stop it. The
+preliminary magic check in front is skipped entirely when `od` is unavailable, which it is on
+some images. So the slot's previous contents are gone either way — verify the dump on your PC
+before copying it over, because the script cannot protect you from a bad one.
 
 ## Manual (if you prefer step by step)
 
@@ -82,7 +94,10 @@ ubiattach -m $inact -d 9 && ubinfo -a -d 9 | grep Name
 ubidetach -d 9 2>/dev/null
 
 # flip to the vendor slot + reboot
-bootslot status      # confirm "other slot ... contents: OTHER-OS"
+bootslot inspect     # confirm "other slot ... contents: OTHER-OS"
+                     # (`status` is read-only now and does not attach UBI; `inspect` does.
+                     #  OTHER-OS is a volume-name heuristic, not positive proof it is the
+                     #  vendor firmware, and not proof that it boots)
 bootslot switch
 reboot
 ```

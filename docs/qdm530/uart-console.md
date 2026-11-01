@@ -48,11 +48,17 @@ Wiring — three wires, cross-over:
 - **GND ↔ GND** (common ground, required)
 - leave any VCC/power pad **unconnected** — the console needs only TX / RX / GND.
 
-> **Put a logic-level converter between your adapter and the board.** The board's console
-> UART and a typical USB-TTL adapter may run at **different logic levels**; driving the
-> board's RX directly from a higher-level adapter can be unreliable or stress the pin, so
-> use a level converter in between (or an adapter that already matches the board's level).
-> Route A's RJ12 port path handles this on-board; the raw pads do not.
+> **Measure the levels before wiring anything to the pads.** Neither level was measured
+> here, which makes this advice incomplete by itself: the IPQ5018 console UART is a 1.8 V
+> SoC I/O domain on paper, a typical USB-TTL adapter is 3.3 V or 5 V, and driving the
+> board's RX from a higher-level adapter can be unreliable or stress the pin. So check the
+> board's idle TX level and your adapter's with a meter first, and only then decide whether
+> you need a level converter, which level converter, or an adapter that already matches.
+>
+> The earlier version of this note also said Route A's RJ12 path "handles this on-board".
+> That was an inference from the cable having worked, not a measurement or a look at the
+> board, so it is withdrawn: what is known is that one specific RJ12-to-USB cable worked
+> plug-and-play, and nothing about where any conversion happens.
 
 Then open the terminal the same way (`picocom -b 115200 ...`).
 
@@ -61,7 +67,9 @@ Then open the terminal the same way (`picocom -b 115200 ...`).
 U-Boot stops at a password prompt (`passwd_abort`). With the terminal open, **power the
 board on and repeatedly send `quectel` + Enter** ("flood" it) — that reliably catches the
 prompt and drops you into the U-Boot shell. From there follow `build-and-flash.md` §4a for
-the TFTP RAM-boot (`tools/tftp-recovery-setup.sh`).
+the TFTP RAM-boot (`tools/tftp-recovery-setup.sh <interface>` — it now requires the
+interface to be named, because it flushes addresses on it and sets it unmanaged; run it
+with no argument to list candidates).
 
 **Automated:** `tools/uart-console.sh -c` floods `quectel` for you and keeps retrying on
 every reset — useful for a **bootlooping** board. Power-cycle it with the flood running,

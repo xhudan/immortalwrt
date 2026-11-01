@@ -30,11 +30,11 @@ write-ups for boards like the GL-B3000 and the Cudy P5.
 | Ethernet | 2 ports: **lan1** = IPQ5018 internal 1G GE PHY, **lan2** = Realtek RTL8221B 2.5G PHY (both LAN; this is a CPE, WAN is cellular) |
 | Wi-Fi | Dual-band, no 6 GHz: 2.4 GHz IPQ5018 built-in + 5 GHz QCN9074 companion. Mainline `ath11k`. |
 | Modem | Quectel RG520N-EB (5G NR / LTE) on PCIe1/MHI (`17cb:0308`); USB host is disabled (the combo PCIe/USB3 PHY is committed to pcie1), so the USB AT/DIAG ports are unavailable |
-| GPIO/LED | AW9523B I2C expander @ `0x5b` on `78b7000.i2c`; drives the 4 front RGB LEDs in constant-current mode via `leds-aw9523` (see `leds.md`) |
+| GPIO/LED | AW9523B I2C expander @ `0x5b` on `78b7000.i2c`; drives the 4 front LEDs (three RGB, one green/blue) in constant-current mode via `leds-aw9523` (see `leds.md`) |
 | Console | UART `ttyMSM0` @ 115200 (`78af000.serial`), pins GPIO20/21 (`blsp0_uart0`) |
 | Front port | RJ12 6-pin serial console (IPQ5018 `ttyMSM0`), **not** an ethernet port — plug-and-play with a RJ12-to-USB console cable (RJ12 pinout not characterized; see `uart-console.md`) |
 | Antennas | 6× u.FL Wi-Fi (more 5 GHz chains than 2.4 GHz), cellular N78 + ANT1–4 |
-| Other | USB Type-C (wired to the IPQ5018 host controller, not a device port), SIM slot |
+| Other | USB Type-C — wired to the **modem's** USB-device port, which is how `adb` into the SDX65 works (`modem-modes.md`). An earlier note here said it goes to the IPQ5018 host controller; that was wrong and is superseded. SIM slot |
 
 ## Boot, console and recovery
 
@@ -56,7 +56,8 @@ write-ups for boards like the GL-B3000 and the Cudy P5.
 - **U-Boot environment** ships a TFTP recovery config: `ipaddr=192.168.10.10`,
   `serverip=192.168.10.19`, `bootcmd=bootipq`, `bootdelay=5`, `machid=8040003`.
   A host at `192.168.10.19` serving the image over TFTP can RAM-boot or reflash.
-  See `tools/tftp-recovery-setup.sh`.
+  See `tools/tftp-recovery-setup.sh <interface>` (run it with no argument to list
+  candidates — it will not guess, since it flushes addresses on whatever it is given).
 - **A/B slots** exist for every critical partition (`rootfs`/`rootfs_1`,
   `APPSBL`/`APPSBL_1`, `QSEE`/`QSEE_1`, `BOOTCONFIG`/`BOOTCONFIG1`). Writing the
   factory image to *both* rootfs slots boots it regardless of the BOOTCONFIG-selected
@@ -86,9 +87,9 @@ mtd4  0:QSEE        mtd9  0:CDT_1       mtd14 0:TRAINING
 | Ethernet lan1 (1 G) | ✅ | IPQ5018 internal GE PHY |
 | Ethernet lan2 (2.5 G) | ✅ | RTL8221B; native 2.5G peer + 1G rate-matching + hot-plug |
 | Wi-Fi 2.4 GHz | ✅ | `ath11k`, broadcasting |
-| Wi-Fi 5 GHz | ✅ | QCN9074, full band at **160 MHz** (ch36 / HE160, 23 dBm — matches vendor), pinned via an ieee80211 hotplug. `board_id` reads 0xff (no caldata), but the width is governed by the regulatory **country**, not caldata: `country=CN` unlocks the full band; `ID`/world collapsed it to 20 MHz. Non-DFS alt: ch149 / HE80 (33 dBm). See `wifi-5ghz-regulatory.md` |
-| Modem WAN — PCIe1/MHI | ✅ | RG520N-EB `17cb:0308`; link trains, WAN auto-seeded + dialed by wwand over QMI-over-QRTR (rmnet/QMAP), IPv4 + IPv6 dual-stack (endpoint/QMAP auto-derived). Sustained-DL stable: the IP_HW0 ring is 512 and `mhi_net` refills it in-line (patches 0958/0959) so the modem's DL engine never starves — see `downlink-stall.md` |
-| Modem — USB | ❌ | USB host disabled: combo PCIe/USB3 PHY is given to pcie1, and dwc3 won't run without the SS PHY — so no USB AT/DIAG ports |
+| Wi-Fi 5 GHz | ✅ | QCN9074 at **160 MHz** (ch36 / HE160, 23 dBm — matches vendor), seeded via an ieee80211 hotplug when unset. `board_id` reads 0xff (no caldata), but the width is governed by the regulatory **country**, not caldata: `country=CN` unlocks the full band; `ID`/world collapsed it to 20 MHz. Non-DFS alt: ch149 / HE80 (33 dBm). See `wifi-5ghz-regulatory.md` |
+| Modem WAN — PCIe1/MHI | ✅ | RG520N-EB `17cb:0308`; link trains, WAN auto-seeded + dialed by wwand over QMI-over-QRTR (rmnet/QMAP), IPv4 + IPv6 dual-stack (endpoint/QMAP auto-derived). Sustained-DL stable in testing: the IP_HW0 ring is 512 and `mhi_net` refills it in-line (patches 0958/0959), which replenishes at the rate the device drains rather than guaranteeing the ring never empties — see `downlink-stall.md` |
+| Modem — USB | ❌ | USB host disabled: the combo PCIe/USB3 PHY is given to pcie1, and dwc3 as configured here did not come up without the SS PHY (a USB2-only setup was never attempted) — so no USB AT/DIAG ports |
 | Front-panel LEDs | ✅ | 4 RGB LEDs on the AW9523B via `leds-aw9523` (`/sys/class/leds`): power, wan (netdev), mobile/signal + status (daemon). See `leds.md` |
 | Watchdog | ✅ | external GPIO WDT on tlmm 26 fed via `gpio-watchdog` |
 | Thermal (tsens) | ➖ N/A | no tsens calibration fuses on this board (the vendor's tsens calibration failed too) — disabled; on mainline the uncalibrated probe also Oopses (`__init`-after-free) |
@@ -113,8 +114,9 @@ interface is kept only as a control/diagnostic side channel.
   `modem-wan-troubleshooting.md` for WAN faults (RX=0 / modem stuck in MBIM,
   `DEVICE_CLAIM_FAILED`, carrier IPv6 refusal, "No Service").
 - **USB (disabled on the board).** The combo PCIe/USB3 PHY is committed to pcie1
-  (above), so the USB3 PHY stays off; mainline dwc3 then refuses to register at all
-  (there is no USB2-only fallback — `dwc3-qcom: failed to register DWC3 Core`), so the
+  (above), so the USB3 PHY stays off; dwc3 as configured here then failed to
+  register (`dwc3-qcom: failed to register DWC3 Core`), and no USB2-only configuration was
+  attempted, so whether one is possible is untested rather than ruled out. Hence the
   SoC USB host controller is disabled in the DTS. Consequence on the board: the modem's
   USB AT/DIAG ports (`2c7c:0801`) do not enumerate and there is no USB-tethering WAN; AT
   where needed goes over QMI instead. Running USB and pcie1 together would need the
@@ -128,13 +130,21 @@ interface is kept only as a control/diagnostic side channel.
 
 ## Open issues
 
-- **No SoC thermal sensor (tsens).** A hardware limitation, not a regression: the
-  board's calibration fuses are unprogrammed, so the vendor firmware's tsens already
-  logged `tsens calibration failed` — thermal sensing never worked on this unit. On
-  mainline the uncalibrated tsens probe additionally Oopses (`__init`-after-free, it
-  runs after the init sections are freed), so `&tsens` is disabled. Fixing the crash
-  would only yield an uncalibrated (useless) reading; the modem carries its own
-  thermal mitigation and the SoC is a low-power dual-A53 @1 GHz.
+- **No SoC thermal sensor (tsens).** `&tsens` is disabled because the probe Oopses:
+  `init_common()` and the per-SoC `.init` callbacks are `__init` but are reached from
+  `tsens_probe()` after the init sections are freed. Patch 0964 removes those annotations,
+  so the crash is fixed in the tree — the node stays off for a **separate** reason, which is
+  that nothing here has established the calibration data is readable.
+
+  What is known: the vendor firmware logged `tsens calibration failed`. What that does *not*
+  establish, and earlier text here asserted anyway: that the fuses are unprogrammed, that
+  this is a hardware limitation rather than a software one, or that a fixed probe would only
+  yield useless readings. A calibration failure in one firmware is not a reading of the OTP,
+  and the one attempt to read SoC fuse nvmem directly rebooted the board. Enabling the node
+  and seeing what it reports is the open work (B4), and it needs the board.
+
+  Unchanged either way: the modem carries its own thermal mitigation, which does not protect
+  the AP SoC, and the SoC is a low-power dual-A53 @1 GHz.
 - **Wi-Fi + modem coexistence.** `pcie0` (5 GHz Wi-Fi) and `pcie1` (modem) are both
   enabled; watch for the reported xHCI↔MHI IRQ interaction under simultaneous
   Wi-Fi + modem load.

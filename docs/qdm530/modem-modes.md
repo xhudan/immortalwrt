@@ -51,7 +51,7 @@ adds `DUN` 32/33; `mhi_wwan_ctrl` then maps it to `WWAN_PORT_AT` and creates
 RG520N-EB — needs `kmod-mhi-wwan-ctrl` + `kmod-mhi-pci-generic` (both in the image).
 
 ```sh
-stty -F /dev/wwan0at0 raw -echo 2>/dev/null
+stty -F /dev/wwan0at0 raw -echo 2>/dev/null   # see the note below on why errors are dropped
 exec 3<>/dev/wwan0at0
 printf 'ATE0\r' >&3
 printf 'ATI\r'  >&3
@@ -75,6 +75,11 @@ cat /dev/smd11 > /tmp/o.txt &
 printf 'AT+QCFG="pcie/mode"\r' > /dev/smd11 ; sleep 3
 kill %1 ; tr -d '\r' < /tmp/o.txt
 ```
+
+`/dev/wwan0at0` is a WWAN character device, not a tty either: `stty` on it fails the same
+way, which is why the line above discards its stderr rather than because the setting matters.
+Dropping the error is convenient but it hides that distinction, so do not read that `stty` as
+having configured anything.
 
 `/dev/smd11` is not a tty, so `microcom`/`stty` fail ("Inappropriate ioctl") — that is
 normal, use raw read/write as above. Its output interleaves with the modem's own polling
@@ -128,8 +133,19 @@ printf 'AT+QCFG="usbnet",3\r'    > /dev/smd11 ; sleep 3
 printf 'AT+QCFG="pcie/mode",1\r' > /dev/smd11 ; sleep 3
 printf 'AT+QMAPWAC=1\r'          > /dev/smd11 ; sleep 3
 # read all three back and confirm 3 / 1 / 1, THEN:
-printf 'AT+CFUN=1,1\r' > /dev/smd11      # modem reboots, ~30-60 s
+printf 'AT+CFUN=1,1\r' > /dev/smd11      # see the warning below BEFORE running this
 ```
+
+> **`AT+CFUN=1,1` is the command this port uses to crash the PCIe link on purpose.**
+> `aer-hang.md` records it as the reliable way to reproduce the modem wedge: it drops the
+> link, and on this board a dropped link is what the whole AER/watchdog story is about. The
+> modem does normally come back in 30–60 s, but "normally" is the extent of it — the wedge
+> that needs a board reboot to clear has been reached from exactly this command, and no
+> host-side recovery for it is proven (see `aer-hang.md` → *"Unvalidated follow-up"*).
+>
+> So: expect the WAN to drop, do not run it on a board you need up, and have console access
+> if you are not physically next to it. `AT+QPOWD` is worse and must not be substituted — the
+> modem powers off and does not return without a board power cycle.
 
 Revert to default (the same way, values `0/0/0`, verify, then `AT+CFUN=1,1`). After the
 modem reboots in default mode the board's PCIe/MHI WAN returns (wwand re-dials); check
