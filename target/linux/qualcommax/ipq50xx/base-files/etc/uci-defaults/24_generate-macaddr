@@ -62,25 +62,42 @@ case "$mac" in
 	*) echo "24_generate-macaddr: refusing to set malformed '$mac'" >&2; exit 1 ;;
 esac
 
-# $mac is the board's BASE address. Only one is assigned today, because only one
-# interface here needs an address assigned: both ethernet ports are bridged into
-# br-lan, and the cellular WAN has no ethernet address at all - mhi_net_setup()
-# makes it ARPHRD_RAWIP with addr_len = 0, IFF_POINTOPOINT|IFF_NOARP - so there
-# is no second interface to derive one for.
+# $mac is the board's BASE address.
 #
-# Should that change, derive from this base rather than generating again -
-# `. /lib/functions/system.sh` then macaddr_add "$mac" 1, and so on - so the
-# whole board stays inside one administratively-assigned block.
+# The LAN bridge takes it directly. The two Wi-Fi radios get derived addresses, which was
+# deferred until the radios could be looked at on hardware - that check is now done, and it
+# argues for deriving them: phy0 presented 00:03:7f:12:1d:1d and phy1 00:03:7f:12:71:71.
+# `00:03:7f` is the Atheros OUI and those trailing octets repeat, which is the shape of a
+# synthetic fallback rather than a per-unit address - so two of these boards would very
+# likely collide on the air. Derived from our own locally-administered base they cannot.
 #
-# The two Wi-Fi radios are deliberately left alone, and NOT because they are
-# known to be fine: a board inspection showed addresses resembling the generic
-# Atheros range, which says nothing about whether they are unique per unit. That
-# is unresolved, not settled. Overriding them blind could equally well replace a
-# working address with a derived one, so it waits until the radios can actually
-# be inspected on hardware.
+# Seeded, not enforced: only set where nothing is set already, so an operator who has
+# chosen an address keeps it. Nothing is assigned for the cellular WAN - mhi_net_setup()
+# makes it ARPHRD_RAWIP with addr_len 0, so it has no link-layer address at all.
+. /lib/functions/system.sh
+
 uci -q set "$dev.macaddr=$mac" || { echo "24_generate-macaddr: uci set failed" >&2; exit 1; }
 uci -q commit network || { echo "24_generate-macaddr: uci commit failed" >&2; exit 1; }
 [ "$(uci -q get "$dev.macaddr")" = "$mac" ] || {
 	echo "24_generate-macaddr: $mac did not persist" >&2; exit 1; }
+
+# Derive one address per radio from the same base, offset so they cannot collide with the
+# bridge. macaddr_add keeps the locally-administered bit, since it only adds to the low
+# bytes.
+i=0
+offset=1
+while uci -q get "wireless.@wifi-device[$i]" >/dev/null 2>&1; do
+	if [ -z "$(uci -q get "wireless.@wifi-device[$i].macaddr")" ]; then
+		radio_mac=$(macaddr_add "$mac" "$offset")
+		case "$radio_mac" in
+			$H$H:$H$H:$H$H:$H$H:$H$H:$H$H)
+				uci -q set "wireless.@wifi-device[$i].macaddr=$radio_mac" || break ;;
+			*) echo "24_generate-macaddr: refusing malformed radio mac '$radio_mac'" >&2 ;;
+		esac
+	fi
+	offset=$((offset + 1))
+	i=$((i + 1))
+done
+[ "$i" -gt 0 ] && { uci -q commit wireless || echo "24_generate-macaddr: wireless commit failed" >&2; }
 
 exit 0

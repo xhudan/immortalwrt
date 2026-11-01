@@ -9,9 +9,9 @@
 # counter does not need to change (and is left untouched). Verified against the vendor
 # getbinary output: a slot switch changes only the flag byte; there is no content checksum.
 #
-# The 4-byte magic and the flag byte are matched by their md5/sha256 (whichever hash tool is
-# present) rather than parsed as numbers, so this works on images whose busybox lacks od and
-# hexdump.
+# The 4-byte magic and the flag byte are matched by their md5/sha256 rather than parsed as
+# numbers. Checked on this board: `hexdump` IS present but `od` is NOT, so anything relying
+# on od silently skips itself here - hashing avoids depending on either.
 #
 # Writing two partitions cannot be made atomic from here, and nothing below changes that.
 # What it does do: read and byte-compare BOTH copies first and refuse if they differ, verify

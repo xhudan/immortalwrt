@@ -58,6 +58,19 @@ case "$act" in
 esac
 [ "$inact" != "$act" ] || die "inactive slot resolved to the active mtd ($act) — refusing"
 
+# The pre-format image check must not depend on `od`: verified on this board that `od` is
+# absent while `hexdump` is present, so an od-based check skips itself exactly when it is
+# needed. Match the UBI magic by hash instead, which needs only md5sum.
+if [ -n "${IMG:-}" ] && [ -f "${IMG:-}" ]; then
+	# UBI#  = 55 42 49 23  -> md5 of those four bytes
+	if [ "$(dd if="$IMG" bs=1 count=4 2>/dev/null | md5sum | cut -d' ' -f1)" \
+		!= 4ada0680313a5de5a5b78678aa9e5928 ]; then
+		die "$IMG does not begin with the UBI EC-header magic (UBI#). Check the dump before
+retrying: formatting the slot with a non-UBI image destroys it for nothing. A legitimate
+dump whose very first erase block was bad can also look like this."
+	fi
+fi
+
 # Check the scratch device is free BEFORE ubiformat destroys the inactive slot, not after.
 [ -d /sys/class/ubi/ubi9 ] && die "ubi9 is already attached - free it before starting"
 
