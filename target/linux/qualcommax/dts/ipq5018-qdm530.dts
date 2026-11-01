@@ -85,25 +85,66 @@
 		 * service devices - so AER and PME are never instantiated on these two
 		 * hosts while the rest of portdrv works normally.
 		 *
-		 * The arguments are therefore GONE from this line. What to check after a
-		 * flash, and what it means if it is wrong:
-		 *   - /sys/bus/pci_express/devices should now be non-empty (portdrv is
-		 *     active again, no longer in compat mode) and must contain NO entry
-		 *     ending in :aer or :pme.
-		 *   - the failure mode if 0962 does not hold is the silent reset above,
-		 *     which appears on the NEXT modem SSR and not necessarily at boot. A
-		 *     reboot with no panic record in pstore is the signature.
-		 *   - to revert: put " pci=noaer pcie_ports=compat" back on the line below.
+		 * The arguments are therefore GONE from this line.
 		 *
-		 * Unchanged by any of this: a runtime SBR is not available (the root port's
-		 * reset_subordinate returns -ENOTTY), and nothing here recovers the MODEM -
-		 * HW-tested 2026-10-29, a host-side re-bind of mhi-pci-generic and a PCI
-		 * remove+rescan both free a daemon wedged on the dead link but do NOT clear
-		 * an MHI SYSERR latch ("Failed to reset MHI due to syserr state"); only a
-		 * board reboot did. Patch 0963 is an untested attempt at that half.
-		 * See docs/qdm530/aer-hang.md.
+		 * The arguments are OFF, but measure what that actually changes before
+		 * trusting the equivalence (HW 2026-11-01, both states flashed):
+		 *   with them:    `pcieport` binds 0 root ports - portdrv never probes
+		 *   without them: `pcieport` binds both - 0962 only keeps the AER and PME
+		 *                 SERVICES from registering, it does not stop portdrv
+		 * So 0962 is not equivalent on that point. What it costs is NOT established:
+		 * zero port services are instantiated either way, so portdrv binding with
+		 * nothing to offer has no demonstrated consequence. Nor is 0962 disproven -
+		 * a modem death took the link down under it without hanging the host, which
+		 * is consistent with the suppression working, though not causal isolation
+		 * (a settled dead link is the easy case; a walk racing link loss is the one
+		 * that bit us). What it still needs is a spontaneous modem SSR under 0962
+		 * with no silent reset.
+		 *
+		 * Do NOT use these as checks: /sys/bus/pci_express/devices is empty either
+		 * way, and the PCI core creates aer_dev_* for any AER-capable device.
+		 * Measure `ls /sys/bus/pci/drivers/pcieport/` instead - count the device
+		 * symlinks, not the directory entries: 0 bound root ports with the
+		 * arguments, 2 without.
+		 *
+		 * One read is known to hang, and the record is deliberately narrow: a
+		 * userspace `hexdump -s 256 -n 512` of 0001:00:00.0/config - the ROOT
+		 * PORT, 32-bit reads from offset 0x100, while the modem downstream had no
+		 * link - hung the CPU until the tlmm26 watchdog bit. That is the root
+		 * port's own DBI window, NOT the downstream path the AER walk used, and
+		 * neither bootarg gates a userspace config read, so it says nothing about
+		 * either. Do not generalise it to "any extended-config read on this
+		 * hierarchy" and do not repeat it to find out.
+		 *
+		 * Restoring the arguments was tried on hardware and did NOT restore the WAN:
+		 * that outage was the modem's radio parked in MODE_ONLY_LOW_POWER, which
+		 * lives in the modem and survives a mains power cycle. This line was never
+		 * it. Keep the two apart when judging either change.
+		 *
+		 * Do NOT use /sys/bus/pci_express/devices as a check. It is empty on this
+		 * board either way - with 0962 because AER and PME are the only services
+		 * these ports offer, and in compat mode because portdrv is off - so it
+		 * cannot tell the two apart. The same goes for the aer_dev_* files, which
+		 * the PCI core creates for any AER-capable device. The failure mode if
+		 * 0962 does not hold is the silent reset above, on the NEXT modem SSR and
+		 * not necessarily at boot: a reboot with no panic record in pstore.
+		 * To revert: put " pci=noaer pcie_ports=compat" back on the line below.
+		 *
+		 * Unchanged by any of this: no runtime function/bus reset exists for this
+		 * endpoint at all. quirk_no_bus_reset is declared for QCOM 0x0308
+		 * (SDX62/SDX65) in drivers/pci/quirks.c, which leaves reset_methods[0] == 0,
+		 * so pci_reset_supported() is false - that is why mhi-pci-generic's
+		 * recovery ends in "Recovery failed: -25" (-ENOTTY from
+		 * pci_try_reset_function()) and why the endpoint has no reset_method sysfs
+		 * attribute. And nothing here recovers the MODEM: HW-tested 2026-10-29, a
+		 * host-side re-bind and a PCI remove+rescan free a daemon wedged on the dead
+		 * link but do NOT clear an MHI SYSERR latch. Patch 0963 was executed once on
+		 * hardware (2026-11-01) against an already-dead link: it quiesced, re-cycled
+		 * the link, timed out after 30 s and returned -ETIMEDOUT without hanging the
+		 * host - but the link did not come back, so it is still unproven as a
+		 * recovery. See docs/qdm530/aer-hang.md.
 		 */
-		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M";
+		bootargs-append = " root=/dev/ubiblock0_1 swiotlb=1 coherent_pool=2M pci=noaer pcie_ports=compat";
 		stdout-path = "serial0:115200n8";
 	};
 
@@ -590,8 +631,12 @@
  * mode, so no host firmware blob is loaded for normal operation (the .fw/.edl
  * in the driver are EDL-recovery only). Data rides the IP_HW0 (rmnet/QMAP)
  * channel; control is QMI-over-QRTR (mhi0_IPCR), brought up by wwand
- * (device=qrtr). No modem-power regulator: the modem powers itself on this
- * board. See docs/qdm530/pcie1-modem-combo-phy.md.
+ * (device=qrtr). There is no modem-power regulator and no modem reset or power
+ * GPIO in this DTS, and none in the vendor DTB either - but that is not the same
+ * as the board having no such line: the vendor drives GPIO 23/27/28/29 for the
+ * modem from userspace with hard-coded numbers (see the userspace-GPIO section of
+ * docs/qdm530/aer-hang.md). Those four are deliberately left unclaimed here.
+ * See also docs/qdm530/pcie1-modem-combo-phy.md.
  *
  * Two things had to be right for the link to train (both verified on HW):
  *   1. usbphy1 (USB3) OFF - the pcie1 PHY is a combo PCIe/USB3 PHY and USB3

@@ -36,6 +36,20 @@ remaining services stay eligible on their own terms. None of those performs the
 AER source-discovery walk, but hotplug can enumerate and remove downstream
 devices, so a board enabling it should look at this itself.
 
+HW 2026-11-01, and it matters for anyone tempted to drop those arguments: on
+the QDM530 (IPQ5018 + Quectel RG520N-EB over MHI) this patch is NOT a usable
+replacement for them. Two images differing only in that one bootargs line,
+same SIM, same userspace: with the arguments, `pcieport` binds no root port and
+the modem's QMI SET_OPERATING_MODE(online) succeeds; without them it binds both
+and that request is answered DEVICE_NOT_READY (error 52) indefinitely. The
+mechanism is not established - the comparison does not separate pci=noaer from
+pcie_ports=compat - but the flags cleared here demonstrably do not cover it.
+Candidates that survive them, from source: portdrv's pci_save_state() reaches
+pci_save_aer_state(), which consults neither native_aer nor
+pci_aer_available(); pci_aer_init() discovers the capability independently; and
+pci_pme_list_scan() polls from the PCI core regardless of native_pme. Keep the
+arguments until one of those is shown to be the cause and closed.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/pci/controller/dwc/pcie-qcom.c
