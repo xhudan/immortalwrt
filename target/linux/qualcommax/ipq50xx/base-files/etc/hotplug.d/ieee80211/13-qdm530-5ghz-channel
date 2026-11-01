@@ -81,7 +81,12 @@ seed_iface_mac() {
 
 config_load wireless
 config_foreach seed_5g wifi-device
-[ -e "$SEEDED" ] || config_foreach seed_iface_mac wifi-iface
+
+# NOT gated on the marker, unlike seed_5g. Nothing else ever writes macaddr on a
+# wifi-iface, so its own "already set?" test is meaningful on its own - and gating it
+# here would mean a config-preserving upgrade never gets stable BSSIDs, which is exactly
+# the upgrade someone does when they do not want to lose their settings.
+config_foreach seed_iface_mac wifi-iface
 
 if [ "$changed" = 1 ]; then
 	uci -q commit wireless && : > "$SEEDED"

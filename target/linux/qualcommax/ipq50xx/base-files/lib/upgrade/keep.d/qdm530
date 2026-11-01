@@ -1,0 +1,5 @@
+# The 5 GHz seeding marker. Without it in the keep list the marker is lost on a
+# config-preserving sysupgrade, and the hotplug script would then re-seed
+# channel/htmode/country over whatever the operator had chosen - which is the exact
+# thing the marker exists to prevent.
+/etc/qdm530-5ghz-seeded
