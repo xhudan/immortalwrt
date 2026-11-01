@@ -80,9 +80,15 @@ to `ipv4v6` only when IPv6 is wanted and the carrier provides it.
 ## 2. WAN shows TX only, RX = 0 (and/or `DEVICE_CLAIM_FAILED`)
 
 **Symptom.** The `wan` has an IP and TX climbs but **RX stays 0** (no download); or LuCI
-shows `Unknown error (DEVICE_CLAIM_FAILED)` and `ifstatus wan` is `"up": false`. This is a
-**data-plane topology** problem, not RF/SIM (RX=0 at the *netdev counter* means DL frames
-never reach the interface at all — a firewall/route problem would still count them).
+shows `Unknown error (DEVICE_CLAIM_FAILED)` and `ifstatus wan` is `"up": false`.
+
+On this board that has always turned out to be a **data-plane topology** problem, and the
+reasoning for looking there first is that RX=0 at the *netdev counter* means DL frames are
+not reaching the interface at all, which a firewall or route problem would not do — those
+count the frames and then drop them. But RX=0 does not by itself exclude RF, the SIM, the
+carrier, or the bearer never having carried downlink traffic in the first place; it narrows
+where to look, it does not diagnose. Check the signal and registration state too if the
+topology checks below come back clean.
 
 **How to confirm.**
 ```sh
@@ -104,7 +110,9 @@ Two root causes, often together:
 
 **(a) Modem shipped in MBIM mode** (`usbnet=2`). The OEM/vendor firmware uses MBIM, so the
 modem's NV is left at `usbnet=2`; flashing ImmortalWrt does not change it, and wwand then
-runs MBIM (no QMAP mux). Confirm/fix over AT (`/dev/at_mdm0` via adb on the modem's USB-C, or
+runs MBIM (no QMAP mux). Confirm/fix over AT — `/dev/at_mdm0` from inside the modem over adb
+on the USB-C (the same port `modem-modes.md` calls `/dev/smd11`; both names appear on this
+modem and either works), or
 a `/dev/wwan*at*` port):
 ```
 AT+QCFG="usbnet"          → if 2 (MBIM), that's it

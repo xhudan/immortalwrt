@@ -79,7 +79,12 @@ memory` freed the `__init` sections — then called the `__init` function
 - NAND kept enabled; the factory image flashed to both rootfs slots → persistent NAND
   boot.
 
-## Status after the post-mortem
+## Status at the time of this post-mortem (a historical checkpoint)
+
+What follows was true when this was written, in September 2026, and is **not** the current
+state of the port — `README.md` has that. In particular the modem now runs over PCIe/MHI
+with wwand, not USB, and the PCIe bring-up questions below were resolved
+(`pcie1-modem-combo-phy.md`).
 
 The recovery-time trims (PCIe/WiFi/modem/USB deletions) and the temporary diagnostic
 `dev_err` prints in `gpio_wdt`/`qcom-wdt` were **removed** once the board booted

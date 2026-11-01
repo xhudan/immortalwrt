@@ -252,8 +252,12 @@ start_link cycle that touches only SoC-local resources, and drives it from
 link, restore the endpoint.
 
 It exists because each earlier attempt had half of it right. The host re-bind cycled
-PERST# but left `qcom-pcie` unbound for good; the reset quirk cleared the modem's
-SYSERR but then stalled re-initialising an endpoint across a link that was not up yet.
+PERST# but left `qcom-pcie` unbound for good; the reset quirk got as far as delivering
+its reset — `mhi-pci-generic 0001:01:00.0: reset` in the log, followed by the MHI ports
+detaching cleanly — and then stalled re-initialising an endpoint across a link that was
+not up yet. Note what that does *not* show: whether the SYSERR was actually cleared. The
+device was gone before anything could read it, so "the quirk cleared SYSERR" is an
+inference from the reset having been delivered, not an observation.
 
 **What is established:** it compiles, the implementation is what the paragraphs above
 describe, and it survived several review rounds against the MHI and PCI source.
@@ -265,13 +269,16 @@ existed — link down after an SSR, and link up with MHI SYSERR latched while
 It will either move up into the measured history above as a fourth failure, or out of this
 section as a fix, once it has been run.
 
-Until then the modem's recovery is wwand's ladder reaching its reboot rung, and
-the mitigation that matters most is not a kernel patch at all: the band-lock fix
-took RSRP from -113 to -93 dBm, which removes the RF stress that triggers the
-modem SSRs in the first place.
+Until then the modem's recovery is wwand's ladder reaching its reboot rung, and the
+change that has made the most practical difference is not a kernel patch at all: the
+band-lock fix took RSRP from -113 to -93 dBm. The wedges have been much rarer since.
+That is correlation over one configuration change on one unit, though — a 20 dB
+improvement plausibly reduces whatever RF condition precedes an SSR, but nothing here
+established the mechanism or that it removes the cause.
 
-### The vendor has no recovery for this at any layer
+### The vendor has no recovery for this in any of the paths inspected
 
+Not a statement about the vendor stack as a whole — these are the paths that were read.
 Checked against the extracted QSDK rootfs, Quectel's out-of-tree `pcie_mhi`
 (what the vendor loads instead of mainline `mhi-pci-generic`), and the vendor
 kernel itself (LZMA inside the FIT in the `kernel` UBI volume):

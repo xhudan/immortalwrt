@@ -62,8 +62,13 @@ rebuild via the existing `prev?.…` mechanism (next to `_failed_at`).
   - `wanted_families()` drops IPv6 when `v6state.refused`;
   - pins `v6state.refused` **immediately** on reason 210, **or** after **2**
     consecutive IPv6 failures of **any** reason (carriers report different codes);
-  - a v6 family that actually comes up resets `v6state.fails`, so a dual-stack
-    carrier never pins even across a one-off transient.
+  - a v6 family that actually comes up resets `v6state.fails`, so an occasional transient
+    does not accumulate toward the pin.
+
+  Note what that does and does not promise. Two consecutive IPv6 failures pin it on any
+  carrier, XL included — a successful attempt resets the counter, it does not exempt the
+  carrier. "XL never pins" was stated here earlier and is stronger than the algorithm: what
+  was observed is that XL kept dual-stack across the test period, not that it cannot pin.
 - **`0002-daemon-persist-v6state-across-context-rebuild.patch`** (`src-ucode/daemon.uc`)
   - carries `v6state` from the previous entry (`prev?.v6state ?? {}`) when a context
     is (re)built, and hands the live object to `factory.create`. **This is what makes

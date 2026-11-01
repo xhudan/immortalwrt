@@ -2,7 +2,8 @@
 
 A hunt that looked like a modem/firmware dead end but turned out to be a host-side
 MHI RX-ring starvation bug, fixed with two small in-tree kernel patches. No
-out-of-tree vendor driver, no auto-reset watchdog — native and zero added latency.
+out-of-tree vendor driver and no auto-reset watchdog. "Zero added latency" was claimed
+here and never measured; what was measured is throughput and stall behaviour, below.
 
 ## Symptom
 
@@ -39,7 +40,7 @@ Captured at a stall from `/sys/kernel/debug/mhi/mhi0/`:
 Read naively this says "the modem ignores buffers it was given" → a firmware dead
 end. That reading was wrong.
 
-## Root cause: RX ring starvation → modem IPA deadlock
+## Root cause: RX ring starvation. The modem-side mechanism is a hypothesis
 
 Two mainline defaults combine badly on this hardware:
 
@@ -52,9 +53,17 @@ Two mainline defaults combine badly on this hardware:
 On the IPQ5018 (dual Cortex-A53 @ 1 GHz) busy with 5G NAT/routing/Wi-Fi, the kworker
 scheduling latency is several ms. Under sustained DL the modem drains the remaining
 ~64 buffers (≈96 KB at MTU 1500) in a few ms — *before* the worker runs. The ring
-hits empty. The SDX6x modem's hardware DL path (IPA) then **deadlocks on descriptor
-starvation** and stops advancing: it reads no more buffers and posts no more events.
-The modem firmware has no internal watchdog to recover the IPA, so it stays wedged.
+hits empty, and the modem then stops advancing: it reads no more buffers and posts no
+more events, and does not resume on its own.
+
+**That last part is where the evidence ends.** What was observed is the ring state (`wp`
+versus `rp` in debugfs), the stall, and that enlarging the ring plus refilling in-line
+removes it. The explanation usually given for it — that the SDX6x hardware DL path (IPA)
+deadlocks on descriptor starvation and that the modem firmware has no internal watchdog
+to recover it — is a plausible reading of those observations, not something measured from
+the modem side. It is written here as the working hypothesis it is, because the fix stands
+on the host-side behaviour either way, and an earlier version of this document asserted the
+internal timeline as fact (down to the refill arriving "milliseconds too late").
 
 The debugfs picture now makes sense: `wp > rp` + `db` rung is the kworker's refill
 arriving a few ms **too late** — after the IPA had already halted. `rp` frozen and
@@ -94,7 +103,8 @@ Ring size alone narrows the window; the in-line refill narrows it much further, 
 does **not** close it: an allocation failure still falls back to the work, and a device
 can still outrun the host. Both together are belt-and-braces, not a guarantee.
 
-**One more patch belongs to this story.**
+**One more patch belongs to this story — reviewed, not soaked.** Everything above was
+measured on hardware; what follows was found by review and has never been exercised.
 `0966-net-mhi_net-no-refill-once-device-is-down.patch` closes a hole the in-line refill
 opened. `mhi_ndo_stop()` cancels the refill work, but a DL completion arriving after
 that cancellation can re-arm it — and with the in-line path it can also queue a buffer
@@ -122,8 +132,9 @@ Built on kernel 6.18.54 + wwand 1.7.0_pre7, flashed, heavy sustained download:
 - `IP_HW0(101)` ring length confirmed `0x2000` (= 512 descriptors).
 - **rx climbed 733,879 packets in ~5 min, `freeze_terlama = 0 s`** — zero stall under
   load that previously wedged at ~30–43 k packets.
-- `loadavg 0.08` (in-line refill is *cheaper* than the old kworker), IRQ 45 ~143/s,
-  internet stayed up throughout.
+- `loadavg 0.08` during the run, IRQ 45 ~143/s, internet stayed up throughout. That is a
+  healthy load figure, not a comparison: no before/after CPU measurement was taken, so it
+  does not establish that in-line refill is cheaper than the old kworker.
 - Followed by a **6-hour soak / endurance run** (sustained + idle→burst): stable, no
   stall.
 
@@ -132,10 +143,14 @@ Built on kernel 6.18.54 + wwand 1.7.0_pre7, flashed, heavy sustained download:
 - `0959` lives under `target/linux/qualcommax/patches-6.18/`, so it only affects this
   target's MHI modems (effectively this board). It is a general improvement and a good
   upstream candidate for `drivers/net/mhi_net.c`.
-- `0958` edits the shared `modem_qcom_v1` channel config (also used by the sdx55m/sdx24
-  profiles in `pci_generic.c`); only the sdx65m board is built here, so it is safe in
-  this tree. For an upstream submission, give the RG520N/QDM530 its own
-  `mhi_pci_dev_info` + config rather than changing the shared one.
+- `0958` edits the shared `modem_qcom_v1` channel config, which the sdx55m/sdx24 profiles
+  in `pci_generic.c` use as well. Building only this board does **not** limit the patch's
+  scope — it is a target patch, so every build of this target carries it, and any modem
+  falling through to that shared profile gets the larger ring. That has not caused trouble
+  (512 matches the vendor's own `NUM_MHI_IPA_IN/OUT_RING_ELEMENTS` and mainline's other
+  SDX6x profiles), but "only one board is built here" is not the reason. For an upstream
+  submission, give the RG520N/QDM530 its own `mhi_pci_dev_info` + config rather than
+  changing the shared one.
 
 See `pcie1-modem-combo-phy.md` for how the modem is brought up on PCIe1/MHI in the
 first place, and `README.md` for the port status table.

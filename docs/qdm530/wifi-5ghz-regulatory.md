@@ -3,7 +3,9 @@
 The 5 GHz radio (QCN9074) looked permanently stuck at **20 MHz** on ImmortalWrt while
 the vendor firmware ran it at **160 MHz**. The obvious suspect — missing per-board
 calibration (`board_id` reads `0xff`) — was a **red herring**. The real lever is the
-regulatory **country code**: `country=CN` unlocks the full band; `country=ID` (and the
+regulatory **country code**: on this firmware `country=CN` makes the wider channels
+available where `country=ID` did not — what was measured is the change in available width,
+not that country is the firmware's only regulatory input; `country=ID` (and the
 `00`/world default) collapse it to 20 MHz. The fix is config-only — no driver patch, no
 caldata.
 
@@ -17,9 +19,10 @@ caldata.
 
 ## What it was NOT (eliminated, HW-tested)
 
-The chip reports `board_id 0xff` because its OTP/ART holds no calibration (`0:ART` is all
-`0xFF`). That led to a long, wrong assumption that full-band 5 GHz needed real vendor
-caldata. Every data/firmware experiment failed **and was beside the point**:
+The chip reports `board_id 0xff` and `0:ART` reads all `0xFF`. That is consistent with no
+calibration being programmed there, though it is a read of one partition and one reported
+id, not a survey of the OTP. Either way it led to a long, wrong assumption that wide-channel
+5 GHz needed real vendor caldata. Every data/firmware experiment failed **and was beside the point**:
 
 - Swapping `QCN9074-board.bin` to the vendor `bdwlan.*` variants — still 20 MHz.
 - Replacing `cal-pci-0000:01:00.0.bin` — `board_id` stays `0xff` (it comes from chip OTP

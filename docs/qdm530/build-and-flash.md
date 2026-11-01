@@ -7,7 +7,14 @@ build/flash recipe.
 > **Cellular WAN = QMI-over-QRTR via wwand.** This transport is now upstream: the
 > daemon (`ddimension/wwand`) ships `qmi_over_qrtr.uc`, and the feed
 > (`ddimension/openwrt-repo`) pins a release that includes it (wwand ≥ 1.7.0_pre7).
-> No feed override is needed — the stock feed builds it as-is.
+> No feed override is needed in principle — the stock feed builds it as-is.
+>
+> **What this checkout actually builds is not that.** `feeds/wwand/wwand/Makefile` here
+> points at `file:///home/huda/Documents/wwand-fork` at `PKG_VERSION 1.8.0_pre33`, a local
+> clone carrying two unmerged IPv6 patches (`ipv6-dualstack-crash-fix.md`). That override is
+> deliberate and deliberately uncommitted, so anyone reproducing this build from the repo
+> gets the stock feed and a different wwand than the one tested here. Historical results in
+> these documents were obtained with the local fork unless they say otherwise.
 
 ## 1. Feeds
 
@@ -211,10 +218,18 @@ sysupgrade -n /tmp/immortalwrt-...-unbranded_qdm530-squashfs-sysupgrade.bin
 ```
 
 Use **`-n` (reset config)** when you want the board to come up on its shipped
-defaults — in particular so the first-boot `uci-defaults` run, including
-`26_wwand-modem`, re-seeds the cellular WAN. A config-preserving upgrade (without
-`-n`) keeps your existing `/etc/config/network` and does **not** re-run those
-scripts.
+defaults — in particular so `26_wwand-modem` seeds the cellular WAN into a fresh
+`/etc/config/network`.
+
+A config-preserving upgrade does keep your existing `/etc/config/network`, but the
+reason is not that the scripts are skipped, which is what this said before.
+`package/base-files/files/etc/init.d/boot` runs whatever is present in
+`/etc/uci-defaults` on every boot; a script is removed once it has run successfully, and
+a preserved overlay keeps that removal, so the ones that already ran do not run again —
+while a **new** seeder arriving in an upgrade does run. What each one then does to your
+settings is down to its own guards, and the ones in this port are written to leave
+existing values alone (see `24_generate-macaddr`, `26_wwand-modem`,
+`13-qdm530-5ghz-channel`).
 
 ## 6. Verify
 

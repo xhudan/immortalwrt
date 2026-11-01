@@ -33,7 +33,7 @@ A **clean vendor** struct (the reference target of this restore) has these 8 ent
 0:QSEE  0:DEVCFG  0:CDT  0:APPSBL  0:HLOS  rootfs  0:WIFIFW  0:BTFW
 ```
 
-There is **no checksum** in the struct, so a bad write is not self-detected — verify by
+There is **no checksum** in the struct, so a bad write is not caught by a checksum — verify by
 reading it back (below).
 
 > ### ⚠️ Struct-repair vs. slot switch, and why dual-boot is not persistent
@@ -122,11 +122,27 @@ the other rootfs slot holds).
 
 ## Safety / recovery
 
-- Writing `mtd2`/`mtd3` only touches the BOOTCONFIG partitions; `SBL1`, `MIBIB`, `QSEE`,
-  `APPSBL`, and both `rootfs` slots are untouched, so a bad BOOTCONFIG is recoverable from
-  U-Boot (password `quectel`) over the serial console. A **wrong-offset** NAND erase/write
-  is not — only write the two BOOTCONFIG mtds, by label (never hardcode mtd numbers blindly;
-  confirm with `/proc/mtd`).
+- Writing `mtd2`/`mtd3` only touches the BOOTCONFIG partitions: `SBL1`, `MIBIB`, `QSEE`,
+  `APPSBL`, and both `rootfs` slots are untouched. That is why the serial console remains
+  the way back in (U-Boot, password `quectel`) — but it does **not** follow that *any* bad
+  BOOTCONFIG is recoverable, which an earlier version of this line asserted. What is known
+  is that one specific wrong state was recovered that way (`0:HLOS=1` → `bad offset of hlos`
+  → fallback, see above). A malformed descriptor the bootloader reacts to differently has
+  not been tried, and "no checksum in the struct" says nothing about what other validation
+  the bootloader does. A **wrong-offset** NAND erase/write is not recoverable at all — only
+  write the two BOOTCONFIG mtds, by label (never hardcode mtd numbers blindly; confirm with
+  `/proc/mtd`).
+
+- **This descriptor selects more than the rootfs slot.** It carries selectors for
+  `0:QSEE`, `0:DEVCFG`, `0:CDT`, `0:APPSBL` and `0:HLOS` as well, so restoring a "clean"
+  struct with every selector zeroed sets all of those, not just the one you came to fix. A
+  sibling board's dump is only the right content if its partition layout and the contents of
+  those partitions match this board's — check `/proc/mtd` on both before using one, and
+  prefer this board's own backup where you have it.
+
+- **The verification steps below print; they do not enforce.** They also read the first copy
+  only, and several of them hardcode `mtd2`/`mtd3` despite the warning above. Read the output
+  before writing, and check the second copy the same way rather than assuming it matches.
 - Keep both copies identical. `age` only matters for picking the fresher copy if the two
   ever differ — a plain restore that writes both the same value is consistent.
 - As always on this board, **UART/TFTP is the only recovery net** if the board stops
