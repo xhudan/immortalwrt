@@ -50,6 +50,21 @@ seed_5g() {
 	[ "$band" = "5g" ] || return 0
 	have_5g=1
 	[ -e "$SEEDED" ] && return 0          # operator territory from here on
+
+	# MIGRATION: a config-preserving upgrade from a build older than the marker
+	# arrives with no marker and a radio that IS already configured, and writing
+	# our defaults over it would replace a deliberate choice. `country` tells the
+	# two apart. On a fresh flash this radio has none when the event fires:
+	# 25_set-wireless-country runs as a uci-default, before the QCN9074
+	# enumerates (~20 s in), so it never sees this section, and `wifi detect`
+	# does not write country either. A 5 GHz radio that already has one was
+	# therefore configured by an earlier seeding or by hand - adopt it, record
+	# the marker so this never runs again, and change nothing.
+	if [ -n "$(uci -q get "wireless.$radio.country")" ]; then
+		seeded_5g=1
+		changed=1
+		return 0
+	fi
 	# `seeded_5g` is deliberately NOT the shared `changed`: the marker must mean
 	# "the 5 GHz defaults were written", and nothing else. Sharing one flag let a
 	# 2.4 GHz-only event (which seeds a MAC and sets `changed`) create the marker,
@@ -91,18 +106,25 @@ lan_base() {
 # are left to mac80211, which derives their BSS addresses itself.
 seed_iface_mac() {
 	local ifsec="$1" dev band base off mac
-	[ -n "$(uci -q get "wireless.$ifsec.macaddr")" ] && return 0
 	config_get dev "$ifsec" device
 	[ -n "$dev" ] || return 0
 	band=$(uci -q get "wireless.$dev.band")
+	# CLAIM THE BAND FIRST, before asking whether this interface already has an
+	# address. Testing that first let a primary AP seeded on an EARLIER event
+	# fall straight through without marking its band, so the next interface on
+	# the same radio - a guest SSID - was handed the very same address. Only the
+	# first interface of a band may hold that band's derived address, whether or
+	# not it is already holding it.
+	#
 	# Two plain flags rather than one built with eval: this runs under busybox
 	# ash on the board, and an indirect-expansion trick would need verifying
 	# there instead of simply being unambiguous everywhere.
 	case "$band" in
-		2g) [ -n "$did_2g" ] && return 0; off=1 ;;
-		5g) [ -n "$did_5g" ] && return 0; off=2 ;;
+		2g) [ -n "$did_2g" ] && return 0; did_2g=1; off=1 ;;
+		5g) [ -n "$did_5g" ] && return 0; did_5g=1; off=2 ;;
 		*)  return 0 ;;
 	esac
+	[ -n "$(uci -q get "wireless.$ifsec.macaddr")" ] && return 0
 	base=$(lan_base)
 	[ -n "$base" ] || return 0
 	mac=$(macaddr_add "$base" "$off") || return 0
@@ -111,10 +133,6 @@ seed_iface_mac() {
 		*) return 0 ;;
 	esac
 	uci -q set "wireless.$ifsec.macaddr=$mac" || return 0
-	case "$band" in
-		2g) did_2g=1 ;;
-		5g) did_5g=1 ;;
-	esac
 	changed=1
 }
 
