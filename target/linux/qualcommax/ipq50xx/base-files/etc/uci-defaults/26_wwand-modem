@@ -22,25 +22,39 @@
 #
 # Recovery ladder: wwand climbs it on repeated activation failures, firing a
 # hardware rung at the attempt counts in `recovery_steps` and finally a board
-# reboot at `failreboot` + 1. The defaults (8/16/24, failreboot 100) are tuned
-# for boards where the rungs can actually do something; two of them cannot here:
-#   - `usb_repower`, the third rung, is a GUARANTEED no-op on this board. It
-#     pulses a modem power or reset line of the kind wwand can drive, and there
-#     is none: the vendor DTB gives the modem's PCIe node only `perst-gpio`
-#     (GPIO 18) - which the PCIe host driver owns, not wwand - no power GPIO, no
-#     supply, no GPIO regulator (see docs/qdm530/aer-hang.md).
-#   - `opmode_cycle` and `modem_reset` are QMI commands, so they need a modem
-#     that still answers. A modem latched in MHI SYSERR does not, and nothing
-#     short of a board reboot clears that - HW-tested: neither a host re-bind
-#     nor a PCI remove+rescan does.
-# So for the failure that actually hurts, the reboot is the only rung that
-# works, and the default put it at attempt 101 ~= 47 min of backoff (the retry
-# backoff is min(n*2s, 30s), so attempt N costs N*(N-1) s up to N=16, then 30 s
-# each). Compress the ladder: both useful QMI rungs early and cheap, reboot at
-# attempt 16 ~= 4 min of backoff (~6-8 min with the time each attempt takes).
-# Not faster than that on purpose - a reboot costs ~2-3 min of its own here
-# (boot, clients reassociating, ~60 s DFS CAC on ch36/HE160), so rebooting
-# sooner would trade a possible self-recovery for certain downtime.
+# reboot at `failreboot` + 1 (upstream: 8/16/24, failreboot 100).
+#
+# This board carried a COMPRESSED ladder (4/10/14, failreboot 15) on the
+# reasoning that no hardware rung could do anything here, so the reboot was the
+# only one that worked. HW 2026-11-01 retired both halves of that reasoning and
+# showed the compression doing real harm, so it is gone.
+#
+# What the rungs actually do here:
+#   - `opmode_cycle` sets the radio to low power and brings it back. If the
+#     bring-back fails the radio is LEFT off, in the modem, surviving reboots
+#     and a mains power cycle. Observed: `SET_OPERATING_MODE(online)` answered
+#     DEVICE_NOT_READY (QMI 52) for 126 attempts afterwards.
+#   - `modem_reset` is worse: twice, a reset left the modem gone from PCIe
+#     entirely (all MHI channels, link down) and a board reboot did NOT bring it
+#     back. Only a modem power cycle did.
+#   - `usb_repower` is still a no-op, but NOT because the board has no modem
+#     power line - it has one, and the earlier claim that it did not was wrong.
+#     The vendor drives GPIO 29/27/28 from userspace with hard-coded numbers
+#     (no device-tree node, which is why the DTB search missed them) and its
+#     sequence power-cycles the modem; replaying it recovered a modem that had
+#     been gone from PCIe, twice, paired with patch 0963's link_recovery. The
+#     rung no-ops only because wwand has no board profile naming those GPIOs
+#     (see the userspace-GPIO section of docs/qdm530/aer-hang.md). Wiring them
+#     in is the open work, and it would make reset+repower a complete recovery.
+#
+# And the failure that drove the compressed ladder all the way to a reboot was
+# not a board fault at all: a SIM with no service. Registration that never
+# completes is NORMAL for a CPE - a lapsed SIM, a carrier outage, bad coverage -
+# and escalating that to a wedged modem and a reboot is strictly worse than
+# waiting. So: upstream's first threshold, and the two rungs that have been
+# observed to make things worse are pushed out of reach until the GPIO repower
+# exists to pair with them. failreboot 0 (never) because a reboot has never once
+# recovered this modem - only a power cycle of the modem itself has.
 #
 # zero_rx_timeout 120 (upstream default 21600 = 6 h) is the DETECTION latency in
 # front of that ladder: wwand's rx_stall_watch trips when the cumulative rx
@@ -85,8 +99,8 @@ if ! uci -q get network.wwmodem >/dev/null; then
 		set network.wwmodem.device='qrtr'
 		set network.wwmodem.protocol='qmi'
 		set network.wwmodem.netdev='mhi_hwip0'
-		set network.wwmodem.recovery_steps='4 10 14'
-		set network.wwmodem.failreboot='15'
+		set network.wwmodem.recovery_steps='8 100000 200000'
+		set network.wwmodem.failreboot='0'
 		set network.wwmodem.zero_rx_timeout='120'
 	EOF
 fi
