@@ -60,6 +60,17 @@ seed_5g() {
 	# does not write country either. A 5 GHz radio that already has one was
 	# therefore configured by an earlier seeding or by hand - adopt it, record
 	# the marker so this never runs again, and change nothing.
+	#
+	# KNOWN GAP, and it is not closable here: `country` is a proxy, not proof.
+	# An operator who picked a channel or width on a pre-marker build while
+	# leaving country unset is still overwritten once. There is no better test
+	# available - `wifi detect` writes a NUMERIC channel and an htmode of its
+	# own (HW: radio0 came up channel '1', htmode 'HE20' from detect alone), so
+	# "channel is set" and "htmode is set" cannot distinguish a generated
+	# default from a deliberate choice that happens to match it. That is exactly
+	# the test which produced the HE80 regression this file's header describes.
+	# Every version of this script has written country alongside channel/width,
+	# so the gap needs a config that never ran any of them.
 	if [ -n "$(uci -q get "wireless.$radio.country")" ]; then
 		seeded_5g=1
 		changed=1
