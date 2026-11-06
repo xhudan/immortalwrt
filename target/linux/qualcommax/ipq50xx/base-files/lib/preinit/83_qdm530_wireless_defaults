@@ -5,8 +5,14 @@ qdm530_wireless_defaults() {
 	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = "unbranded,qdm530" ] || return 0
 	[ -e /etc/qdm530-5ghz-seeded ] && return 0
 	[ -e /etc/qdm530-5ghz-pending ] && return 0
-	if [ -s /etc/config/wireless ]; then
-		# Adopt all pre-existing configs, including ones without country.
+	# -e, not -s: an EMPTY wireless config is not evidence of a fresh install.
+	# /sbin/wifi's wifi_config() does `[ ! -f /etc/config/wireless ] && touch`
+	# BEFORE mac80211.uc generates any section, so a boot interrupted in between -
+	# or one where nothing was detected - leaves a zero-length file behind, and a
+	# backup can restore one. Treating the file's mere existence as "not ours"
+	# means an old empty config never gets the board defaults; that is the
+	# conservative direction and the one this hook exists for.
+	if [ -e /etc/config/wireless ]; then
 		: > /etc/qdm530-5ghz-seeded
 	else
 		# Persist until the late radio has actually been seeded successfully.

@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 """Run the real preinit/seeding functions with temporary files and a fake UCI.
+
+FUNCTION tests, not end-to-end: these drive qdm530_wireless_defaults(), seed_5g()
+and seed_iface_mac() directly and read back what they decided. They do NOT
+exercise the rest of the hotplug script - the uci commit, writing the final
+marker, removing the pending token, or the `wifi` reload - so passing here means
+the decisions are right, not that the boot path works. That still needs a flash.
+
 No router access, real UCI invocation, or wireless reload.
 """
 import os
@@ -29,13 +36,18 @@ macaddr_add() { echo 02:11:22:33:44:51; }
 '''
 
 class Defaults(unittest.TestCase):
-    def run_case(self, existing_config, band='5g', existing_mac='1', seeded=False):
+    def run_case(self, existing_config, band='5g', existing_mac='1', seeded=False,
+                 empty_config=False):
         with tempfile.TemporaryDirectory(prefix='qdm530-test-') as tmp:
             root = Path(tmp)
             (root / 'etc/config').mkdir(parents=True)
             (root / 'tmp/sysinfo').mkdir(parents=True)
             (root / 'tmp/sysinfo/board_name').write_text('unbranded,qdm530\n')
-            if existing_config:
+            if empty_config:
+                # /sbin/wifi touches this before generating anything, so a
+                # zero-length file is NOT evidence of a fresh install.
+                (root / 'etc/config/wireless').touch()
+            elif existing_config:
                 # Deliberately no country: this is still operator-owned config.
                 (root / 'etc/config/wireless').write_text("config wifi-device 'radio0'\n option channel '149'\n option htmode 'HE80'\n")
             if seeded:
@@ -74,6 +86,16 @@ class Defaults(unittest.TestCase):
     def test_existing_marker_is_respected(self):
         out, pending = self.run_case(True, seeded=True)
         self.assertNotIn('SET ', out)
+        self.assertFalse(pending)
+
+    def test_empty_config_is_not_a_fresh_install(self):
+        # Regression: an -s test treated a zero-length wireless config as fresh
+        # and seeded over it. wifi_config() creates exactly that file with touch
+        # before mac80211.uc writes any section.
+        out, pending = self.run_case(False, empty_config=True, existing_mac='')
+        self.assertNotIn('channel=36', out)
+        self.assertNotIn('htmode=HE160', out)
+        self.assertIn('SEEDED5=0', out)
         self.assertFalse(pending)
 
     def test_seeded_primary_does_not_assign_guest(self):
