@@ -307,9 +307,14 @@ experiment needs no reboot). That is containment of an experimental interface,
 not isolation from generic PCI config access, external resets or system PM. Keep
 it off in normal service.
 
-With the parameter off, every path this patch adds is inert, and the chain is
-worth stating because it is what makes the containment real rather than
-cosmetic: `set_bit(MHI_PCI_DEV_QUIESCED)` happens only inside
+With the parameter off **and no recovery having been accepted since probe**, every
+path this patch adds is inert. The parameter gates the acceptance of new
+requests; it does not unwind state a previous recovery left behind - clearing it
+back to false after a failed recovery does not clear `MHI_PCI_DEV_QUIESCED` or
+`->relink_hw_off`, and a device parked that way stays parked until a successful
+recovery or a reboot. The chain below is what makes the gate meaningful on a
+board that has never asked for a recovery, which is the normal case:
+`set_bit(MHI_PCI_DEV_QUIESCED)` happens only inside
 `link_recovery_store()`, after the parameter check; `qcom_pcie_relink()` is
 reached only from `qcom_pcie_link_recover()`, which is reached only through
 `bridge->link_recover()`, which only that store calls; `->relink_hw_off` is set
@@ -318,21 +323,42 @@ only inside the relink; and the new branches in `health_check()` and
 published unconditionally - offering the capability is its point, and it is inert
 until something calls it.
 
-**A cheaper path that would make this patch unnecessary, and has never been
-tried.** What actually recovered the modem on 2026-11-01 was the vendor's GPIO
-power-cycle sequence; `link_recovery` was the second half. But the table above
+**An alternative built only from standard sysfs - a hypothesis, NOT a ready
+procedure.** What recovered the modem on 2026-11-01 was the vendor's GPIO
+power-cycle sequence, with `link_recovery` as the second half. The table above
 records that plain PCI `remove` + `rescan` already retrains the link ("link
-retrains at 5 GT/s x1") - it just did not clear SYSERR, and SYSERR is exactly
-what the GPIO power cycle clears. Both attributes are standard mainline sysfs
-(`dev_rescan_store`, `remove`, `bus_rescan_store` in `drivers/pci/pci-sysfs.c`)
-and are present in this kernel without `CONFIG_HOTPLUG_PCI`. So the untried
-combination is **GPIO power cycle, then `remove` + `rescan`**, with no custom
-kernel code at all - and `remove` tears the device down cleanly before
-re-enumeration instead of poking a dead link, so the dead-link hazard goes with
-it. The reason it might fail is equally concrete: `rescan` toggles no PERST# and
-re-inits no controller, so if the link needs PERST# to retrain after the modem
-is power-cycled, rescan finds nothing. Test that before hardening this patch or
-backporting anything.
+retrains at 5 GT/s x1") but did not clear SYSERR. The GPIO power cycle is the
+step that plausibly clears it - plausibly, because the only observation is that
+GPIO-plus-link-recovery recovered the modem, and the contribution of each step
+was never isolated. Both attributes are standard mainline sysfs
+(`dev_rescan_store`, `remove`, `bus_rescan_store` in `drivers/pci/pci-sysfs.c`),
+present in this kernel without `CONFIG_HOTPLUG_PCI`. So a recovery with no
+custom kernel code is conceivable.
+
+**It does not retire the dead-link hazard, and an earlier version of this
+section wrongly said it did.** `remove` is not a passive teardown and `rescan` is
+not a passive scan; both reach downstream config space:
+
+| path | access |
+|---|---|
+| `pci-driver.c:pci_device_remove()` | `pm_runtime_get_sync()` first - on a suspended device that is an MHI runtime resume, which enables the device and sets master over PCI |
+| `pci_generic.c:mhi_pci_remove()` → `mhi_power_down(..., true)` | graceful shutdown can reach `mhi_pm_disable_transition()`, which resets and polls MHI registers |
+| `devres.c:pcim_disable_device()` → `pci.c:do_pci_disable_device()` | reads `PCI_COMMAND` on the endpoint and writes it back if bus-mastering is set (pci.c:2184) |
+| `probe.c:pci_cfg_space_size_ext()` | reads at offset 0x100 during enumeration - the same extended-config region that hung this board |
+
+Ordinary (non-extended) config access downstream is equally unsafe on a dead
+link, so "only extended config is dangerous" is not a defence either. And doing
+the power cycle FIRST leaves the driver bound while the hardware disappears, so
+the health-check timer, PM, or any other work can reach it before `remove` even
+starts. That `remove` once completed and freed a wedged daemon proves it for
+that one state, not for every link-down state.
+
+A more defensible ordering to investigate - still requiring an audit of what
+enumeration touches, and still no proof it recovers a wedged modem - is
+`remove` while the endpoint is still responsive, then the power cycle, then wait
+for the local link, then `rescan`. Note also that power-cycling the modem has
+itself left it gone until mains power was pulled. Do not run this as a procedure
+on the basis of the hypothesis alone.
 
 `0963-PCI-add-a-host-bridge-link-recovery-hook.patch` adds a `->link_recover` hook to
 `struct pci_host_bridge`, implements it in `pcie-qcom` as a deinit/PERST/init/setup_rc/
@@ -351,12 +377,16 @@ inference from the reset having been delivered, not an observation.
 **What is established:** it compiles, the implementation is what the paragraphs above
 describe, and it survived several review rounds against the MHI and PCI source.
 
-**What is not:** anything about recovery. No recovery has ever been run on this board, and
-both observed wedge modes remain exactly as unresolved as they were before the patch
-existed — link down after an SSR, and link up with MHI SYSERR latched while
-`health_check` still reads a valid vendor ID. The patch is the experiment, not the result.
-It will either move up into the measured history above as a fourth failure, or out of this
-section as a fix, once it has been run.
+**What is not:** anything about recovery by THIS revision. The hook has been run on
+hardware three times, on 2026-11-01 and all on the pre-containment revision: twice it
+reported `link up` and `link recovery complete`, each time paired with the vendor GPIO
+power-cycle sequence, and once it timed out cleanly with `-ETIMEDOUT` without hanging the
+host. Those runs are described earlier in this document and are not invalidated — but they
+say nothing about the current revision, which has the opt-in gate and has not been
+flashed. Nor do they isolate what did the work: the two successes followed a modem power
+cycle, so the hook's own contribution is unmeasured. And the second wedge mode — link up
+with MHI SYSERR latched while `health_check` still reads a valid vendor ID — has never
+been addressed by it at all.
 
 Until then the modem's recovery is wwand's ladder reaching its reboot rung, and the
 change that has made the most practical difference is not a kernel patch at all: the
