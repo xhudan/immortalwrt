@@ -1,0 +1,17 @@
+#!/bin/sh
+# Decide before boot's wifi config/kmodloader can generate radio sections.
+# Missing country/channel is not evidence that an existing config is disposable.
+qdm530_wireless_defaults() {
+	[ "$(cat /tmp/sysinfo/board_name 2>/dev/null)" = "unbranded,qdm530" ] || return 0
+	[ -e /etc/qdm530-5ghz-seeded ] && return 0
+	[ -e /etc/qdm530-5ghz-pending ] && return 0
+	if [ -s /etc/config/wireless ]; then
+		# Adopt all pre-existing configs, including ones without country.
+		: > /etc/qdm530-5ghz-seeded
+	else
+		# Persist until the late radio has actually been seeded successfully.
+		: > /etc/qdm530-5ghz-pending
+	fi
+}
+
+boot_hook_add preinit_main qdm530_wireless_defaults

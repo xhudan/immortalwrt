@@ -30,6 +30,9 @@
 
 have_5g=0
 changed=0
+seeded_5g=0
+did_2g=
+did_5g=
 
 # Apply the board defaults ONCE, on the radio's first appearance, recorded by a marker.
 #
@@ -51,31 +54,9 @@ seed_5g() {
 	have_5g=1
 	[ -e "$SEEDED" ] && return 0          # operator territory from here on
 
-	# MIGRATION: a config-preserving upgrade from a build older than the marker
-	# arrives with no marker and a radio that IS already configured, and writing
-	# our defaults over it would replace a deliberate choice. `country` tells the
-	# two apart. On a fresh flash this radio has none when the event fires:
-	# 25_set-wireless-country runs as a uci-default, before the QCN9074
-	# enumerates (~20 s in), so it never sees this section, and `wifi detect`
-	# does not write country either. A 5 GHz radio that already has one was
-	# therefore configured by an earlier seeding or by hand - adopt it, record
-	# the marker so this never runs again, and change nothing.
-	#
-	# KNOWN GAP, and it is not closable here: `country` is a proxy, not proof.
-	# An operator who picked a channel or width on a pre-marker build while
-	# leaving country unset is still overwritten once. There is no better test
-	# available - `wifi detect` writes a NUMERIC channel and an htmode of its
-	# own (HW: radio0 came up channel '1', htmode 'HE20' from detect alone), so
-	# "channel is set" and "htmode is set" cannot distinguish a generated
-	# default from a deliberate choice that happens to match it. That is exactly
-	# the test which produced the HE80 regression this file's header describes.
-	# Every version of this script has written country alongside channel/width,
-	# so the gap needs a config that never ran any of them.
-	if [ -n "$(uci -q get "wireless.$radio.country")" ]; then
-		seeded_5g=1
-		changed=1
-		return 0
-	fi
+	# Only preinit may authorize defaults, before wifi config generates sections.
+	# Without that explicit fresh-install token, preserve the existing config.
+	[ -e /etc/qdm530-5ghz-pending ] || return 0
 	# `seeded_5g` is deliberately NOT the shared `changed`: the marker must mean
 	# "the 5 GHz defaults were written", and nothing else. Sharing one flag let a
 	# 2.4 GHz-only event (which seeds a MAC and sets `changed`) create the marker,
@@ -160,7 +141,9 @@ if [ "$changed" = 1 ]; then
 	# The marker is written ONLY when the 5 GHz defaults were among what was
 	# committed. A MAC-only commit must not claim the 5 GHz seeding happened.
 	if uci -q commit wireless; then
-		[ "$seeded_5g" = 1 ] && : > "$SEEDED"
+		if [ "$seeded_5g" = 1 ]; then
+			: > "$SEEDED" && rm -f /etc/qdm530-5ghz-pending
+		fi
 	fi
 fi
 

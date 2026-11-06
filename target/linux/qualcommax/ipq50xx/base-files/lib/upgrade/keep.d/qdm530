@@ -3,3 +3,4 @@
 # channel/htmode/country over whatever the operator had chosen - which is the exact
 # thing the marker exists to prevent.
 /etc/qdm530-5ghz-seeded
+/etc/qdm530-5ghz-pending
