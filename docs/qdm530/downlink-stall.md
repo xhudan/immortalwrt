@@ -104,28 +104,34 @@ Ring size alone narrows the window; the in-line refill narrows it much further, 
 does **not** close it: an allocation failure still falls back to the work, and a device
 can still outrun the host. Both together are belt-and-braces, not a guarantee.
 
-**One more patch belongs to this story — reviewed, not soaked.** The results above were
-measured on hardware (the mechanism they are explained by was not, see the root-cause
-section); what follows was found by review and has never been exercised at all.
-`0966-net-mhi_net-no-refill-once-device-is-down.patch` narrows a hole the in-line refill
-opened. `mhi_ndo_stop()` cancels the refill work, but a DL completion arriving after
-that cancellation can re-arm it — and with the in-line path it can also queue a buffer
-directly. The buffer is harmless: `mhi_gen_tre()` checks
-`ch_state == MHI_CH_STATE_ENABLED` and publishes under `mhi_chan->lock`, while
-`mhi_unprepare_channel()` takes the same lock to set `MHI_CH_STATE_DISABLED` before
-`mhi_reset_chan()` reclaims what is queued — so a published buffer is always reclaimed
-with `-ENOTCONN` and a refused one is freed. The **work item** is not harmless: if that
-completion fails to allocate or queue, it schedules `rx_refill`, and
-`mhi_net_dellink()` then calls `free_netdev()` with the work pending, while
-`mhi_net_rx_refill_work()` reaches `ndev` and `mdev` through the netdev private area.
-That is a use-after-free. The patch gates both refill paths on `netif_running()` and
-drains the work again in `dellink()` after `mhi_unprepare_from_transfer()`.
+**0966: the teardown drain, and why it needs no lock.** `mhi_ndo_stop()` cancels
+the refill work, but a DL completion arriving after that cancellation can re-arm
+it, and `mhi_net_dellink()` would then `free_netdev()` with the work pending -
+`mhi_net_rx_refill_work()` reaches `ndev` and `mdev` through the netdev private
+area, so that is a use-after-free. The patch gates both refill paths on
+`netif_running()` and drains the work once more after
+`mhi_unprepare_from_transfer()`.
 
-It narrows rather than closes: nothing in `mhi_unprepare_channel()` waits for a
-callback that is already executing, and MHI exposes no callback-quiesce point to drain
-after. Only the allocation/queue failure branch reaches the dangerous path, so no
-ordinary refill test exercises it — validating it wants fault injection on that branch
-concurrent with close and removal, which has not been done.
+Two review rounds proposed adding a reader/writer lock, then RCU, to protect the
+`driver_data` lookup against teardown. Neither is needed, and the reason is a
+lock one level up from the one both arguments reasoned about:
+
+| step | what serialises it |
+|---|---|
+| data xfer callback invoked | only from `parse_xfer_event()`, via `mhi_process_data_event_ring()` |
+| that ring processed | `mhi_ev_task()` holds `spin_lock_bh(&mhi_event->lock)` **across** the call (data rings get this tasklet; `MHI_ER_CTRL` rings get `mhi_ctrl_ev_task()`, which invokes no data callback) |
+| in-flight callback waited for | `mhi_unprepare_channel()` → `mhi_reset_chan()` → `mhi_mark_stale_events()` takes the **same** `mhi_event->lock` |
+| new callbacks blocked | `ch_state = MHI_CH_STATE_DISABLED` under `write_lock_irq()`; `parse_xfer_event()` rechecks it under `read_lock_bh()` and returns early |
+
+So after `mhi_unprepare_from_transfer()` returns, no data callback can run on
+these channels and nothing can re-arm the work behind the drain. `mhi_chan->lock`
+*is* released before the callback at `parse_xfer_event()` - that is true, and it
+is what misled both rounds; it is simply not the lock that matters here.
+
+Still unvalidated on hardware: only the allocation/queue failure branch reaches
+the dangerous path, so no ordinary refill test exercises it. That wants fault
+injection on that branch concurrent with close and removal, and the historical
+soak below does not validate it.
 
 ## Verification
 
