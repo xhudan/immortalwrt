@@ -116,17 +116,26 @@ Two review rounds proposed adding a reader/writer lock, then RCU, to protect the
 `driver_data` lookup against teardown. Neither is needed, and the reason is a
 lock one level up from the one both arguments reasoned about:
 
-| step | what serialises it |
+`mhi_chan->xfer_cb` has three call sites in the host core, and all three are
+accounted for:
+
+| call site | what accounts for it |
 |---|---|
-| data xfer callback invoked | only from `parse_xfer_event()`, via `mhi_process_data_event_ring()` |
-| that ring processed | `mhi_ev_task()` holds `spin_lock_bh(&mhi_event->lock)` **across** the call (data rings get this tasklet; `MHI_ER_CTRL` rings get `mhi_ctrl_ev_task()`, which invokes no data callback) |
+| `parse_xfer_event()` | runs under `mhi_event->lock`, which `mhi_ev_task()` holds **across** `process_event()`; rechecks `ch_state != MHI_CH_STATE_ENABLED` under `read_lock_bh()` first |
+| `parse_rsc_event()` | same tasklet, same lock, same recheck |
+| `mhi_reset_data_chan()` | returns outstanding buffers with `-ENOTCONN` **synchronously inside** the unprepare, so it finishes before it returns; mhi_net's handler frees the skb and returns early for that status |
 | in-flight callback waited for | `mhi_unprepare_channel()` → `mhi_reset_chan()` → `mhi_mark_stale_events()` takes the **same** `mhi_event->lock` |
-| new callbacks blocked | `ch_state = MHI_CH_STATE_DISABLED` under `write_lock_irq()`; `parse_xfer_event()` rechecks it under `read_lock_bh()` and returns early |
+| new callbacks blocked | `ch_state = MHI_CH_STATE_DISABLED` set under `write_lock_irq()` before that |
 
 So after `mhi_unprepare_from_transfer()` returns, no data callback can run on
 these channels and nothing can re-arm the work behind the drain. `mhi_chan->lock`
-*is* released before the callback at `parse_xfer_event()` - that is true, and it
+*is* released before the callback in `parse_xfer_event()` - that is true, and it
 is what misled both rounds; it is simply not the lock that matters here.
+
+The reason to carry no driver-side lock is that the core's synchronisation is
+sufficient. A reader/writer lock would also add a shared-lock acquire to every rx
+and tx completion, which is not free - but its cost on this SoC was never
+measured, so that is a secondary argument, not the one doing the work.
 
 Still unvalidated on hardware: only the allocation/queue failure branch reaches
 the dangerous path, so no ordinary refill test exercises it. That wants fault

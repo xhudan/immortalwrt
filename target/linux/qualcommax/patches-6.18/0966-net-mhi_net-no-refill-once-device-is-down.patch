@@ -15,12 +15,29 @@ the buffer with -ENOTCONN, which mhi_net_dl_callback() frees, or the disable win
 and mhi_queue_skb() refuses it and the callback frees it. Nothing is published
 that is not then reclaimed.
 
-The serious one is the work item. If that late completion fails to allocate or to
-queue, it schedules rx_refill - and mhi_net_dellink() then unprepares the
-channels and calls free_netdev() with the work still pending.
-mhi_net_rx_refill_work() reaches mhi_netdev, ndev and mdev through the netdev
-private area, so that is a use-after-free rather than a stray skb, and gating the
-worker on netif_running() would not help: reading the freed ndev is the problem.
+The work item is the one that would matter: if that late completion fails to
+allocate or to queue, it schedules rx_refill, and mhi_net_rx_refill_work()
+reaches mhi_netdev, ndev and mdev through the netdev private area - so work left
+pending over free_netdev() would be a use-after-free rather than a stray skb, and
+gating the worker on netif_running() would not help, because reading the freed
+ndev is the problem.
+
+Whether that interleaving is REACHABLE through the normal remove path is not
+established, and two review rounds got this wrong in opposite directions before
+noticing why. mhi_driver_remove() (init.c) does the teardown itself BEFORE
+calling the client's .remove: it takes mhi_chan->mutex, sets
+ch_state = MHI_CH_STATE_SUSPENDED under write_lock_irq(), runs mhi_reset_chan()
+- which synchronises against the event ring and returns the outstanding buffers
+- and only then calls mhi_drv->remove(), which is what reaches
+mhi_net_dellink(). So by the time unregister_netdev() runs ndo_stop(), the
+callbacks on these channels have already been stopped by the bus. No other
+caller of mhi_net_dellink() exists.
+
+This patch is therefore a DEFENSIVE drain, not a fix for a demonstrated
+use-after-free: it makes mhi_net's own teardown correct on its own terms rather
+than relying on the bus having already quiesced the channels, which is a
+contract the client cannot see. Fault injection, when it happens, has to target
+an interleaving that is actually possible - which means establishing one first.
 
 So: gate both refill paths on netif_running() in the completion handler -
 __dev_close_many() clears __LINK_STATE_START before calling ndo_stop, so the gate
@@ -32,27 +49,35 @@ The drain after unprepare is final, and it is worth writing down why, because
 two reviews in a row proposed adding a lock or an RCU section to this driver to
 close a window the MHI core already closes:
 
- - a data xfer callback is only ever invoked from parse_xfer_event(), reached
-   from mhi_process_data_event_ring();
- - that runs as mhi_event->process_event() from mhi_ev_task(), which holds
-   spin_lock_bh(&mhi_event->lock) ACROSS the call - data rings get this tasklet,
-   while MHI_ER_CTRL rings get mhi_ctrl_ev_task() and mhi_process_ctrl_ev_ring(),
-   which invokes no data callback;
- - mhi_unprepare_channel() -> mhi_reset_chan() -> mhi_mark_stale_events() takes
-   that same mhi_event->lock, so it waits out a callback already executing;
- - and ch_state is set to MHI_CH_STATE_DISABLED under write_lock_irq() before
-   that, while parse_xfer_event() rechecks ch_state != MHI_CH_STATE_ENABLED under
-   read_lock_bh() and returns without calling the callback.
+mhi_chan->xfer_cb has three call sites in the host core, and all three are
+accounted for:
+
+ - parse_xfer_event() and parse_rsc_event(), both reached from
+   mhi_process_data_event_ring(), which runs as mhi_event->process_event() from
+   mhi_ev_task() while it holds spin_lock_bh(&mhi_event->lock) ACROSS the call.
+   MHI_ER_DATA rings get that tasklet; MHI_ER_CTRL rings get mhi_ctrl_ev_task()
+   with mhi_process_ctrl_ev_ring(), which invokes no data callback. Both also
+   recheck ch_state != MHI_CH_STATE_ENABLED under read_lock_bh() first, and
+   mhi_unprepare_channel() has set MHI_CH_STATE_DISABLED under write_lock_irq()
+   by then;
+ - mhi_reset_data_chan(), which returns outstanding buffers with -ENOTCONN
+   synchronously from inside the unprepare, so it is finished before
+   mhi_unprepare_from_transfer() returns. mhi_net's handler frees the skb and
+   returns early for that status.
+
+And mhi_unprepare_channel() -> mhi_reset_chan() -> mhi_mark_stale_events() takes
+the same mhi_event->lock, so a callback already executing is waited out.
 
 So once mhi_unprepare_from_transfer() has returned, no further data callback can
 run on these channels, and nothing can re-arm rx_refill behind the cancellation
-that follows. A driver-side rwlock would add a lock acquire to every rx and tx
-completion for this, and an RCU section would need the handlers reworked to stop
-re-reading driver_data; neither buys anything here.
+that follows. The core's own synchronisation is sufficient - that, and not any
+throughput argument, is why no driver-side lock belongs here. (A reader/writer
+lock would add a shared-lock acquire to every rx and tx completion, which is not
+free, but its cost on this SoC was never measured and should not be claimed.)
 
-(An earlier version of this very paragraph claimed the opposite, reasoning from
-mhi_chan->lock being released before the callback at parse_xfer_event(). That is
-true and irrelevant: the serialising lock is the event-ring lock, one level up.)
+(Two earlier revisions reasoned the opposite way, from mhi_chan->lock being
+released before the callback in parse_xfer_event(). That is true and irrelevant:
+the serialising lock is the event-ring lock, one level up.)
 
 Still unvalidated: only the allocation/queue failure branch reaches the dangerous
 path, so a normal successful-refill test never exercises it. Validating it wants
@@ -65,9 +90,11 @@ already stood.
 
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
+diff --git a/drivers/net/mhi_net.c b/drivers/net/mhi_net.c
+index 219a3a8..8e89c5f 100644
 --- a/drivers/net/mhi_net.c
 +++ b/drivers/net/mhi_net.c
-@@ -240,7 +240,31 @@
+@@ -240,7 +240,31 @@ static void mhi_net_dl_callback(struct mhi_device *mhi_dev,
  	 * queue_is_full() test above - is the authoritative check, so losing
  	 * that race against the fallback worker only costs one allocation.
  	 */
@@ -100,7 +127,7 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
  		unsigned int size = mhi_netdev->mru ? mhi_netdev->mru :
  					READ_ONCE(mhi_netdev->ndev->mtu);
  		struct sk_buff *nskb = netdev_alloc_skb(mhi_netdev->ndev, size);
-@@ -363,6 +387,25 @@
+@@ -363,6 +387,27 @@ static void mhi_net_dellink(struct mhi_device *mhi_dev, struct net_device *ndev)
  
  	mhi_unprepare_from_transfer(mhi_dev);
  
@@ -114,12 +141,14 @@ Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 +	 * free_netdev(), and mhi_net_rx_refill_work() reaches ndev and mdev
 +	 * through the netdev private area - a use-after-free, not a stray skb.
 +	 *
-+	 * Not an airtight drain: mhi_unprepare_channel() sets
-+	 * MHI_CH_STATE_DISABLED under mhi_chan->lock and resets the channel,
-+	 * which stops new events, but nothing there waits for a callback that
-+	 * is already executing. MHI exposes no callback-quiesce point to place
-+	 * this after, so a completion still in flight can re-arm the work after
-+	 * this returns. The window is narrowed, not closed.
++	 * This drain IS final, and the guarantee comes from the core: a data
++	 * callback executing when the teardown starts runs under
++	 * mhi_event->lock (mhi_ev_task() holds it across process_event()), and
++	 * mhi_unprepare_channel() -> mhi_reset_chan() -> mhi_mark_stale_events()
++	 * takes that same lock, so it waits the callback out. The synchronous
++	 * returns from mhi_reset_data_chan() complete before unprepare returns.
++	 * And ch_state is MHI_CH_STATE_DISABLED by then, which parse_xfer_event()
++	 * and parse_rsc_event() recheck before calling the callback at all.
 +	 */
 +	cancel_delayed_work_sync(&mhi_netdev->rx_refill);
 +
