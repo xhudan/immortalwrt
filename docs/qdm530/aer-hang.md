@@ -300,6 +300,40 @@ qualcommax) to reach a release that still does not contain the blocker.
 
 ### Unvalidated follow-up — not a recovery procedure
 
+The sysfs recovery operation is disabled by default. It returns `-EOPNOTSUPP`
+unless the operator opts in through `mhi-pci-generic`'s
+`experimental_host_recovery` parameter (writable at runtime, so a controlled
+experiment needs no reboot). That is containment of an experimental interface,
+not isolation from generic PCI config access, external resets or system PM. Keep
+it off in normal service.
+
+With the parameter off, every path this patch adds is inert, and the chain is
+worth stating because it is what makes the containment real rather than
+cosmetic: `set_bit(MHI_PCI_DEV_QUIESCED)` happens only inside
+`link_recovery_store()`, after the parameter check; `qcom_pcie_relink()` is
+reached only from `qcom_pcie_link_recover()`, which is reached only through
+`bridge->link_recover()`, which only that store calls; `->relink_hw_off` is set
+only inside the relink; and the new branches in `health_check()` and
+`mhi_pci_remove()` test a bit that is therefore never set. The hook itself stays
+published unconditionally - offering the capability is its point, and it is inert
+until something calls it.
+
+**A cheaper path that would make this patch unnecessary, and has never been
+tried.** What actually recovered the modem on 2026-11-01 was the vendor's GPIO
+power-cycle sequence; `link_recovery` was the second half. But the table above
+records that plain PCI `remove` + `rescan` already retrains the link ("link
+retrains at 5 GT/s x1") - it just did not clear SYSERR, and SYSERR is exactly
+what the GPIO power cycle clears. Both attributes are standard mainline sysfs
+(`dev_rescan_store`, `remove`, `bus_rescan_store` in `drivers/pci/pci-sysfs.c`)
+and are present in this kernel without `CONFIG_HOTPLUG_PCI`. So the untried
+combination is **GPIO power cycle, then `remove` + `rescan`**, with no custom
+kernel code at all - and `remove` tears the device down cleanly before
+re-enumeration instead of poking a dead link, so the dead-link hazard goes with
+it. The reason it might fail is equally concrete: `rescan` toggles no PERST# and
+re-inits no controller, so if the link needs PERST# to retrain after the modem
+is power-cycled, rescan finds nothing. Test that before hardening this patch or
+backporting anything.
+
 `0963-PCI-add-a-host-bridge-link-recovery-hook.patch` adds a `->link_recover` hook to
 `struct pci_host_bridge`, implements it in `pcie-qcom` as a deinit/PERST/init/setup_rc/
 start_link cycle that touches only SoC-local resources, and drives it from

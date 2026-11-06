@@ -113,6 +113,12 @@ and generic PCI config access is not gated by an MHI flag at all. Extending the
 flag to those callbacks needs a deliberate lock order, not just more test_bit()
 calls, since recovery_mutex currently serialises writers only.
 
+The sysfs recovery operation is disabled by default. It requires the explicit
+experimental_host_recovery module parameter before accepting a request. This
+is containment of an experimental interface, not a fix for generic PCI access,
+system PM or externally initiated reset races. Keep it off in normal service.
+The opt-in does not make those operations safe while an endpoint is parked.
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 diff --git a/include/linux/pci.h b/include/linux/pci.h
@@ -150,7 +156,7 @@ index 7e3459b..51badc9 100644
  };
  
 diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
-index 1186044..30e8d4c 100644
+index 1186044..5270970 100644
 --- a/drivers/pci/controller/dwc/pcie-qcom.c
 +++ b/drivers/pci/controller/dwc/pcie-qcom.c
 @@ -20,6 +20,7 @@
@@ -340,7 +346,7 @@ index 1186044..30e8d4c 100644
  static int qcom_pcie_probe(struct platform_device *pdev)
  {
  	const struct qcom_pcie_cfg *pcie_cfg;
-@@ -1970,6 +2136,14 @@ static int qcom_pcie_probe(struct platform_device *pdev)
+@@ -1970,6 +2136,20 @@ static int qcom_pcie_probe(struct platform_device *pdev)
  		goto err_phy_exit;
  	}
  
@@ -349,13 +355,19 @@ index 1186044..30e8d4c 100644
 +	 * Installed here because dw_pcie_host_init() is what allocates
 +	 * pp->bridge; unlike the native_aer/native_pme suppression in
 +	 * qcom_pcie_host_init(), nothing reads this during pci_host_probe().
++	 *
++	 * Published unconditionally: offering the capability is the point of the
++	 * hook, and it is inert until something calls it. The containment lives
++	 * with the caller - mhi-pci-generic refuses its sysfs write unless an
++	 * operator opts in - so nothing here runs, and ->relink_hw_off stays
++	 * false, on a board that never asks for a recovery.
 +	 */
 +	pp->bridge->link_recover = qcom_pcie_link_recover;
 +
  	qcom_pcie_icc_opp_update(pcie);
  
  	if (pcie->mhi)
-@@ -2027,7 +2201,27 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
+@@ -2027,7 +2207,27 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
  	 * powerdown state. This will affect the lifetime of the storage devices
  	 * like NVMe.
  	 */
@@ -384,7 +396,7 @@ index 1186044..30e8d4c 100644
  		qcom_pcie_host_deinit(&pcie->pci->pp);
  		pcie->suspended = true;
  	}
-@@ -2072,6 +2266,8 @@ static int qcom_pcie_resume_noirq(struct device *dev)
+@@ -2072,6 +2272,8 @@ static int qcom_pcie_resume_noirq(struct device *dev)
  			return ret;
  
  		pcie->suspended = false;
@@ -394,7 +406,7 @@ index 1186044..30e8d4c 100644
  
  	qcom_pcie_icc_opp_update(pcie);
 diff --git a/drivers/bus/mhi/host/pci_generic.c b/drivers/bus/mhi/host/pci_generic.c
-index 49fb665..a44a92a 100644
+index 49fb665..b1364cc 100644
 --- a/drivers/bus/mhi/host/pci_generic.c
 +++ b/drivers/bus/mhi/host/pci_generic.c
 @@ -13,7 +13,9 @@
@@ -440,7 +452,7 @@ index 49fb665..a44a92a 100644
  	dev_warn(&pdev->dev, "device recovery started\n");
  
  	if (!pdev->is_virtfn)
-@@ -1243,6 +1257,257 @@ err_try_reset:
+@@ -1243,6 +1257,270 @@ err_try_reset:
  		dev_err(&pdev->dev, "Recovery failed: %d\n", err);
  }
  
@@ -478,6 +490,17 @@ index 49fb665..a44a92a 100644
 +
 +	return n == 1;
 +}
++
++/*
++ * Containment for the experimental entry point below: it is refused unless an
++ * operator opts in, because enabling it does not serialise generic PCI
++ * reset/config access or system PM against a recovery in progress. Writable at
++ * runtime so a controlled experiment does not need a reboot.
++ */
++static bool experimental_host_recovery;
++module_param(experimental_host_recovery, bool, 0600);
++MODULE_PARM_DESC(experimental_host_recovery,
++	"Allow experimental host link recovery (does not isolate dead-link accesses)");
 +
 +/*
 + * Recovery for an endpoint that has dropped the PCIe link.
@@ -569,6 +592,8 @@ index 49fb665..a44a92a 100644
 +	u32 id, expect;
 +	int err;
 +
++	if (!READ_ONCE(experimental_host_recovery))
++		return -EOPNOTSUPP;
 +	if (!mhi_pdev)
 +		return -ENODEV;
 +	if (pdev->is_virtfn)
@@ -698,7 +723,7 @@ index 49fb665..a44a92a 100644
  static void health_check(struct timer_list *t)
  {
  	struct mhi_pci_device *mhi_pdev = timer_container_of(mhi_pdev, t,
-@@ -1250,7 +1515,8 @@ static void health_check(struct timer_list *t)
+@@ -1250,7 +1528,8 @@ static void health_check(struct timer_list *t)
  	struct mhi_controller *mhi_cntrl = &mhi_pdev->mhi_cntrl;
  
  	if (!test_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status) ||
@@ -708,7 +733,7 @@ index 49fb665..a44a92a 100644
  		return;
  
  	if (!mhi_pci_is_alive(mhi_cntrl)) {
-@@ -1313,6 +1579,7 @@ static int mhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+@@ -1313,6 +1592,7 @@ static int mhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
  	if (!mhi_pdev)
  		return -ENOMEM;
  
@@ -716,7 +741,7 @@ index 49fb665..a44a92a 100644
  	INIT_WORK(&mhi_pdev->recovery_work, mhi_pci_recovery_work);
  
  	if (pdev->is_virtfn && info->vf_config)
-@@ -1424,6 +1691,16 @@ static void mhi_pci_remove(struct pci_dev *pdev)
+@@ -1424,6 +1704,16 @@ static void mhi_pci_remove(struct pci_dev *pdev)
  		timer_delete_sync(&mhi_pdev->health_check_timer);
  	cancel_work_sync(&mhi_pdev->recovery_work);
  
@@ -733,7 +758,7 @@ index 49fb665..a44a92a 100644
  	if (test_and_clear_bit(MHI_PCI_DEV_STARTED, &mhi_pdev->status)) {
  		mhi_power_down(mhi_cntrl, true);
  		mhi_unprepare_after_power_down(mhi_cntrl);
-@@ -1704,6 +1981,7 @@ static struct pci_driver mhi_pci_driver = {
+@@ -1704,6 +1994,7 @@ static struct pci_driver mhi_pci_driver = {
  	.remove		= mhi_pci_remove,
  	.shutdown	= mhi_pci_shutdown,
  	.err_handler	= &mhi_pci_err_handler,
