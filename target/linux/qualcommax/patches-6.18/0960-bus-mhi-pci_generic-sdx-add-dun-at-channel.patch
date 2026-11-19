@@ -1,23 +1,41 @@
-From: Muhammad Huda Nugroho <mhudan21@gmail.com>
-Subject: [PATCH] bus: mhi: pci_generic: expose the SDX DUN (AT) channel
+From 710bf7329abf86e37db529f19c8f394099238892 Mon Sep 17 00:00:00 2001
+From: Krishna Chaitanya Chundru <krishna.chundru@oss.qualcomm.com>
+Date: Fri, 25 Sep 2026 10:07:43 +0530
+Subject: [PATCH] bus: mhi: host: pci_generic: Add DUN channel configuration
 
-The generic modem_qcom_v1 config (bound by the Quectel RG520N-EB, which
+Add the DUN uplink (ch32) and downlink (ch33) channel definitions to
+the Qualcomm modem MHI channel configuration table.
+
+These channels are used for transporting AT commands over MHI.
+Defining them allows the MHI core to create the corresponding DUN MHI
+devices and enables userspace access to the modem AT interface through
+the MHI WWAN client driver.
+
+Signed-off-by: Krishna Chaitanya Chundru <krishna.chundru@oss.qualcomm.com>
+Signed-off-by: Manivannan Sadhasivam <manivannan.sadhasivam@oss.qualcomm.com>
+Link: https://patch.msgid.link/20260925-mhi_dun-v1-1-65bc07ec8a59@oss.qualcomm.com
+
+Backported for 6.18 (commit 710bf7329abf, identical change).
+
+LOCAL commentary, not part of the upstream commit message - why this board needs
+it and how it was confirmed, kept because it is the evidence this port rests on:
+
+The generic modem_qcom_v1 config is what the Quectel RG520N-EB binds: it
 enumerates as the plain Qualcomm 17cb:0308 and so falls through to
-mhi_qcom_sdx65_info) declares DIAG/MBIM/QMI/IPCR/IP_SW0/IP_HW0/FIREHOSE but no
-DUN channel, so the host never opens MHI channel 32/33 and no AT port appears on
-the router. All other modem profiles in this file (Quectel em1xx/rm5xx, Telit,
-Sierra, Foxconn) carry DUN at 32/33, and the modem firmware DOES provide it:
-verified on the RG520N-EB (sdxlemur) over adb, which runs
-`port_bridge smd7 mhi_pipe_32` - the modem bridges its AT port (smd7) to MHI
-channel 32 and merely waits for the host to open it (the device-side
-/dev/mhi_pipe_32 is created on demand; only the channels modem_qcom_v1 opens -
-2/4/10/12/14/16 - exist until then).
+mhi_qcom_sdx65_info, which declared DIAG/MBIM/QMI/IPCR/IP_SW0/IP_HW0/FIREHOSE
+but no DUN - so the host never opened MHI channel 32/33 and no AT port appeared
+on the router, while every other modem profile in this file (Quectel em1xx/rm5xx,
+Telit, Sierra, Foxconn) already carried DUN at 32/33.
 
-Declare DUN 32/33 on the control event ring (ring 0, as MBIM/QMI/IPCR already
-do - a low-traffic control channel needs no ring of its own). mhi_wwan_ctrl maps
-"DUN" -> WWAN_PORT_AT, so the host then exposes /dev/wwan0at0 and AT works from
-the router. 32-element rings match every other DUN in this file. A modem that
-happens not to implement the channel simply leaves it disabled - harmless.
+The modem firmware does provide it: verified on the RG520N-EB (sdxlemur) over
+adb, which runs `port_bridge smd7 mhi_pipe_32` - the modem bridges its AT port
+(smd7) to MHI channel 32 and merely waits for the host to open it (the
+device-side /dev/mhi_pipe_32 is created on demand; only the channels
+modem_qcom_v1 opens - 2/4/10/12/14/16 - exist until then).
+
+mhi_wwan_ctrl maps "DUN" -> WWAN_PORT_AT, so the host exposes /dev/wwan0at0.
+HW-proven on this board: the port appeared and answered AT (ATI -> Quectel
+RG520N-EB) directly from the router, with no adb-into-modem detour.
 
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
