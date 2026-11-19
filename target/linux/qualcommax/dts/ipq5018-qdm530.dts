@@ -778,11 +778,21 @@
  */
 
 /*
- * Thermal sensor (tsens) DISABLED - a hardware limitation, not just a workaround.
- * This board's calibration fuses are unprogrammed: the vendor firmware's own tsens
- * already logs "qcom-tsens 4a8000.thermal-sensor: tsens calibration failed", so SoC
- * thermal sensing never worked on this unit (cf. the all-0xff WiFi caldata and the
- * qfprom reads that crash the SoC - the same unprovisioned OTP). On mainline the
+ * Thermal sensor (tsens) DISABLED.
+ *
+ * What is OBSERVED: the vendor firmware's own tsens logs
+ * "qcom-tsens 4a8000.thermal-sensor: tsens calibration failed", so SoC thermal
+ * sensing did not work on this unit under the vendor's own stack either.
+ *
+ * What is INFERRED, and should not be read as settled: that the cause is
+ * unprogrammed calibration fuses. "Calibration failed" is also consistent with an
+ * access problem, a different fuse layout than the driver expects, or a driver bug
+ * - and the two things cited alongside it do not close the gap. The all-0xff WiFi
+ * caldata lives in the 0:art flash partition, a different region entirely, not in
+ * qfprom; and a qfprom read crashing the SoC says the access is unsafe, not that
+ * the fuse is blank. Deciding this needs the B5 diagnosis, not this comment.
+ *
+ * Why it is off regardless: on mainline the
  * uncalibrated tsens probe is also deferred (its qfprom/nvmem cells come up late) and
  * runs at ~9.4s, after "Freeing unused kernel memory" freed the __init sections; its
  * probe then calls init_tsens_v1_no_rpm() (an __init function) and the CPU faults on
