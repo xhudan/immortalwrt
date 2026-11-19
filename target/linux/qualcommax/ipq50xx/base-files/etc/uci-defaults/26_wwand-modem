@@ -56,22 +56,49 @@
 # exists to pair with them. failreboot 0 (never) because a reboot has never once
 # recovered this modem - only a power cycle of the modem itself has.
 #
-# zero_rx_timeout 120 (upstream default 21600 = 6 h) is the DETECTION latency in
-# front of that ladder: wwand's rx_stall_watch trips when the cumulative rx
-# counter has stood still this long. It reads only rx -- TX is never consulted --
-# so on a CGNAT'd cellular link with an idle LAN it cannot tell a dead bearer
-# from a quiet one, and 6 h is upstream being honest about that. 120 s is safe
-# here ONLY because /usr/sbin/qdm530-wan-keepalive keeps one echo per 30 s
-# flowing on the WAN, which makes "no rx" mean dead rather than idle.
-# THE ORDER MATTERS: never shorten this without that probe running, or a quiet
-# night trips the watchdog on a healthy link and climbs the ladder to a reboot.
+# zero_rx_timeout 0 (OFF; upstream default 21600 = 6 h). It was 120 s here, and
+# that was a mistake born of a wrong model of what the watchdog does.
 #
-# KNOWN WEAKNESS of this pairing, and the native alternative. The probe makes
-# "no rx" mean "dead" only when the probe itself is answered. If it goes
-# unanswered for reasons upstream of the modem -- ICMP filtered, a carrier
-# outage, a routing problem -- then rx stands still on a link whose bearer is
-# fine, and 120 s later the daemon starts climbing the ladder. The probe reduces
-# the idle/dead ambiguity; it does not remove the false positive.
+# The watchdog itself: wwand's rx_stall_watch trips when the cumulative rx
+# counter has stood still for this long. It reads only rx -- TX is never
+# consulted -- so on a CGNAT'd cellular link with an idle LAN it cannot tell a
+# dead bearer from a quiet one. /usr/sbin/qdm530-wan-keepalive keeps one echo
+# per 30 s flowing to make "no rx" mean dead rather than idle, but that only
+# works while the probe is answered: if it goes unanswered for a reason upstream
+# of the modem -- ICMP filtered, a carrier outage, a routing problem -- then rx
+# stands still on a link whose bearer is fine.
+#
+# WHAT HAPPENS ON A TRIP IS NOT THE LADDER. An earlier version of this comment
+# said a false positive would "climb the ladder to a reboot", and the ladder
+# values above were raised partly to contain that. They do not contain it at
+# all: modem_common.trip_zero_rx() consults recovery_steps nowhere. It asks
+# rec.can_repower(), and if that is false it calls self.reset() directly --
+# wwand's own docs say as much ("on a board that can repower it repowers, else
+# it falls through to a modem reset"). can_repower() is
+# `opts.can_repower ? opts.can_repower() : (opts.repower != null)`, and this
+# board ships no wwand board profile, so it is false and the reset is what runs.
+# failreboot=0 does not gate it either; that only disables the final reboot rung.
+#
+# And a modem reset is the one action on this board with an observed
+# catastrophic outcome: twice it left the modem gone from PCIe entirely, with
+# every MHI channel down, recovered only by cutting mains power. So the
+# watchdog's only available remedy here is worse than the fault it detects, and
+# a detector that can false-positive into that is a liability however long its
+# timeout is -- 6 h would make it rarer, not safe.
+#
+# Off until there is a safe remedy to offer it. That remedy is concrete and is
+# open work: the vendor drives GPIO 29/27/28 to power-cycle the modem (see the
+# userspace-GPIO section of docs/qdm530/aer-hang.md), and replaying that
+# sequence recovered a modem that had vanished from PCIe, twice. Wiring those
+# into a wwand board profile makes can_repower() true, at which point a trip
+# repowers instead of resetting and this can be re-enabled.
+#
+# What is lost meanwhile: a bearer that is up but dead is no longer
+# auto-recovered. The connection-attempt ladder still covers a bearer that
+# fails to CONNECT (opmode_cycle at attempt 8). wwand's native answer for the
+# rest is `context_failed` on the ubus interface -- something that actually
+# understands routes and reachability decides, and the daemon acts -- which is
+# the arrangement to move to rather than re-shortening this timeout.
 #
 # wwand's own answer to this is NOT an in-daemon probe: ddimension/wwand#13 was
 # closed having rejected one ("An ICMP probe is squarely L3: it needs a source
@@ -101,7 +128,7 @@ if ! uci -q get network.wwmodem >/dev/null; then
 		set network.wwmodem.netdev='mhi_hwip0'
 		set network.wwmodem.recovery_steps='8 100000 200000'
 		set network.wwmodem.failreboot='0'
-		set network.wwmodem.zero_rx_timeout='120'
+		set network.wwmodem.zero_rx_timeout='0'
 	EOF
 fi
 
