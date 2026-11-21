@@ -37,6 +37,15 @@ The brace placement on init_8939() and init_8956() is fixed here as well, since
 these lines are being touched anyway and checkpatch wants the brace on its own
 line.
 
+[Local note on the upstream submission, 2026-11-21: mainline master has NINE of
+ these, not eight. init_8952() in tsens-v1.c is newer than 6.18.60 and carries
+ the same annotation while being a .init member of ops_8952, so the version sent
+ upstream covers it too and says "all nine". This patch stays at eight because
+ that is every one that exists in 6.18.60 - do not add init_8952 here, it will
+ not apply. The submitted patch is generated against mainline, not from this
+ file: the context above init_8956() differs (mainline gained init_8952 right
+ before it), so this one applies to mainline only with fuzz.]
+
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
 ---
 --- a/drivers/thermal/qcom/tsens.c
