@@ -8,11 +8,16 @@ below the refill threshold and empties before the host can refill it, and the
 modem's hardware DL (IPA) engine then deadlocks on descriptor starvation and
 stops forever until a modem reset (rx frozen, tx ok, link up).
 
-Qualcomm's own vendor pcie_mhi driver uses 512 (NUM_MHI_IPA_IN/OUT_RING_ELEMENTS),
-and mainline already uses 512 for other SDX6x modems (e.g. the Telit/Sierra
-profiles in this file). Match that: 512 x 16-byte TRE = 8 KiB of ring, trivial
-DMA memory, 4x more headroom for the host to keep the ring fed. The dedicated
-HW DL event ring (2048) already satisfies the "event >= 2x channel" rule.
+Qualcomm's own vendor pcie_mhi driver uses 512 (NUM_MHI_IPA_IN/OUT_RING_ELEMENTS).
+512 x 16-byte TRE = 8 KiB of ring, trivial DMA memory, 4x more headroom for the
+host to keep the ring fed. The dedicated HW DL event ring (2048) already
+satisfies the "event >= 2x channel" rule.
+
+Do NOT read this as aligning with the rest of the file: counted in 6.18.60, only
+two of the ten profiles here use 512 for channel 100/101 (mhi_sierra_em919x and
+mhi_mv3x), and the other seven - including every Telit profile - use 128. 128 is
+the norm in this file, not the exception. An earlier version of this message
+claimed the Telit profiles were already at 512; that was simply wrong.
 
 Two limits on the evidence. The hardware test that cleared the stall ran this
 together with the in-line refill change, so it measures the PAIR; this patch

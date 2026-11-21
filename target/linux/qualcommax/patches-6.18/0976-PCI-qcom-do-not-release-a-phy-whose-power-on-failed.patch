@@ -15,8 +15,12 @@ release is both wrong and unnecessary.
 
 On a single-port controller the very first failure is enough to reach -1. It is
 normally invisible because a failed host init at probe time is fatal anyway, but
-it becomes reachable the moment anything retries host init at runtime - as
-system resume does, and as the link recovery in the next patch does.
+it becomes reachable the moment anything retries host init at runtime, as system
+resume does.
+
+[Local note, not for the upstream message: the other runtime retry that makes
+ this reachable here is the link-recovery hook carried as 0978, which is a local
+ experiment and must not be referenced in anything sent upstream.]
 
 Unwind with list_for_each_entry_continue_reverse() so only the ports that were
 successfully powered on are powered off, and fail the phy_set_mode_ext() case
