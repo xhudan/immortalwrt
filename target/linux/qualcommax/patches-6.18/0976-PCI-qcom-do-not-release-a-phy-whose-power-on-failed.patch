@@ -22,6 +22,42 @@ resume does.
  this reachable here is the link-recovery hook carried as 0978, which is a local
  experiment and must not be referenced in anything sent upstream.]
 
+[Prior art, checked 2026-11-21. No report or patch for THIS function was found:
+ mainline master still has qcom_pcie_phy_power_on() calling the whole-list
+ qcom_pcie_phy_power_off() on a failed phy_power_on(), and still returns bare
+ from the phy_set_mode_ext() failure leaving earlier ports powered. But the
+ mechanism is already conceded upstream, which is worth citing when sending:
+
+ - Vladimir Oltean, reviewing "scsi: ufs: qcom: Drop the PHY power_count check"
+   (March 2026), stated exactly this underflow: "If 0, the power_count would
+   become negative after phy_power_off(), and a subsequent phy_power_on() would
+   merely bump it back to 0". The patch's author - Manivannan Sadhasivam, who
+   also maintains qcom PCIe - accepted it and withdrew his own patch ("let's
+   drop this patch and proceed with your state tracking patch instead"). So the
+   reviewer most likely to see this one has already agreed the underflow is real.
+
+ - The counter-precedent to expect: "PCI: tegra: Unwind partial PHY ..."
+   (Pengpeng Hou, August 2026) made the structurally identical unwind fix for
+   tegra and was rejected by Thierry Reding - "If this ever happened, it'd mean
+   that either the system is improperly designed, badly configured in device
+   tree or somehow broken. In either case the unwind isn't really going to save
+   you."
+
+   That objection answers a LEAK argument, and it is fair against one. It does
+   not answer this patch, and the difference has to be led with rather than
+   defended later: the damage here is not a PHY left powered, it is a refcount
+   driven BELOW zero, which outlives the failed attempt and silently disables
+   the next successful-looking phy_power_on(). Frame it as state corruption
+   reachable from system resume, not as cleanup hygiene.
+
+ Message-ids were not recovered - these were read via a list mirror, so look
+ them up on lore.kernel.org before putting Link: tags in a submission.
+
+ Also in flight near this code: a "PCI: qcom: Add link retention support" series
+ (v3, July 2026) that itself mentions leaking PHY power-on/clock/regulator counts
+ on probe deferral. Rebase against current -next before sending; this may
+ collide.]
+
 Unwind with list_for_each_entry_continue_reverse() so only the ports that were
 successfully powered on are powered off, and fail the phy_set_mode_ext() case
 the same way instead of leaking the ports already acquired.
