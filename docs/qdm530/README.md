@@ -88,11 +88,11 @@ mtd4  0:QSEE        mtd9  0:CDT_1       mtd14 0:TRAINING
 | Ethernet lan2 (2.5 G) | ✅ | RTL8221B; native 2.5G peer + 1G rate-matching + hot-plug |
 | Wi-Fi 2.4 GHz | ✅ | `ath11k`, broadcasting |
 | Wi-Fi 5 GHz | ✅ | QCN9074 at **160 MHz** (ch36 / HE160, 23 dBm — matches vendor), seeded via an ieee80211 hotplug when unset. `board_id` reads 0xff and `0:ART` is all 0xFF; what was measured is that the regulatory **country** governs the available width on this firmware — `country=CN` gave the wider channels where `ID`/world gave 20 MHz. Non-DFS alt: ch149 / HE80 (33 dBm). See `wifi-5ghz-regulatory.md` |
-| Modem WAN — PCIe1/MHI | ✅ | RG520N-EB `17cb:0308`; link trains, WAN auto-seeded + dialed by wwand over QMI-over-QRTR (rmnet/QMAP), IPv4 + IPv6 dual-stack (endpoint/QMAP auto-derived). Sustained-DL stable in testing: the IP_HW0 ring is 512 and `mhi_net` refills it in-line (patches 0958/0959), which replenishes at the rate the device drains rather than guaranteeing the ring never empties — see `downlink-stall.md` |
+| Modem WAN — PCIe1/MHI | ✅ | RG520N-EB `17cb:0308`; link trains, WAN auto-seeded + dialed by wwand over QMI-over-QRTR (rmnet/QMAP), IPv4 + IPv6 dual-stack (endpoint/QMAP auto-derived). Sustained-DL stable in testing: the IP_HW0 ring is 512 and `mhi_net` refills it in-line (patches 0973/0974), which replenishes at the rate the device drains rather than guaranteeing the ring never empties — see `downlink-stall.md` |
 | Modem — USB | ❌ | USB host disabled: the combo PCIe/USB3 PHY is given to pcie1, and dwc3 as configured here did not come up without the SS PHY (a USB2-only setup was never attempted) — so no USB AT/DIAG ports |
 | Front-panel LEDs | ✅ | 4 RGB LEDs on the AW9523B via `leds-aw9523` (`/sys/class/leds`): power, wan (netdev), mobile/signal + status (daemon). See `leds.md` |
 | Watchdog | ✅ | external GPIO WDT on tlmm 26 fed via `gpio-watchdog` |
-| Thermal (tsens) | ➖ off | `&tsens` disabled. The probe Oopsed (`__init`-after-free), which patch 0964 fixes; it stays off because nothing here has established the calibration data is readable — the vendor firmware logged `tsens calibration failed`, which is not a reading of the OTP. See *Open issues* |
+| Thermal (tsens) | ➖ off | `&tsens` disabled. The probe Oopsed (`__init`-after-free), which patch 0979 fixes; it stays off because nothing here has established the calibration data is readable — the vendor firmware logged `tsens calibration failed`, which is not a reading of the OTP. See *Open issues* |
 
 ## Modem
 
@@ -132,7 +132,7 @@ interface is kept only as a control/diagnostic side channel.
 
 - **No SoC thermal sensor (tsens).** `&tsens` is disabled because the probe Oopses:
   `init_common()` and the per-SoC `.init` callbacks are `__init` but are reached from
-  `tsens_probe()` after the init sections are freed. Patch 0964 removes those annotations,
+  `tsens_probe()` after the init sections are freed. Patch 0979 removes those annotations,
   so the crash is fixed in the tree — the node stays off for a **separate** reason, which is
   that nothing here has established the calibration data is readable.
 
@@ -187,18 +187,20 @@ Key in-tree pieces:
 - `target/linux/qualcommax/ipq50xx/base-files/usr/sbin/bootslot` (A/B slot switch from
   ImmortalWrt — see `boot-slots.md`)
 - `package/kernel/leds-aw9523/` (AW9523B constant-current LED driver, `kmod-leds-aw9523`)
-- `target/linux/qualcommax/patches-6.18/0955–0966` — twelve local kernel patches:
-  - `0955` + `0965` SPI-NAND ECC context — **not ours**, a backport of upstream
-    `f94c9b68bb5f` + `8d6911645478`; drop both once the kernel here carries them
-  - `0956` UNIPHY refclk (a workaround; no native consumer exists for a per-PHY clock
-    before PHY discovery), `0957` GMAC1 2500BASEX-only on a DT-pinned port
-  - `0958` + `0959` the sustained-DL stall (`downlink-stall.md`), `0966` the refill
+- `target/linux/qualcommax/patches-6.18/0971–0981` — eleven local kernel patches:
+  - `0980` SPI-NAND ECC context cleanup — **not ours**, the 2/2 of upstream
+    `8d6911645478`; its 1/2 (`f94c9b68bb5f`, the publication fix we carried as `0970`)
+    reached 6.18 stable and is now in the baseline, so that patch is gone. Drop `0980`
+    too once the cleanup follows it into the kernel here
+  - `0971` UNIPHY refclk (a workaround; no native consumer exists for a per-PHY clock
+    before PHY discovery), `0972` GMAC1 2500BASEX-only on a DT-pinned port
+  - `0973` + `0974` the sustained-DL stall (`downlink-stall.md`), `0981` the refill
     gate and work drain that the in-line refill made necessary
-  - `0960` the modem's DUN/AT channel (`modem-modes.md`)
-  - `0961` a `qcom-pcie` PHY refcount underflow on the error unwind (upstream candidate),
-    `0962` per-host AER/PME suppression (`aer-hang.md`, not yet validated),
-    `0963` the host-side link-recovery hook (**an experiment, never run**)
-  - `0964` tsens `__init`-after-free (upstream candidate; `&tsens` stays disabled
+  - `0975` the modem's DUN/AT channel (`modem-modes.md`)
+  - `0976` a `qcom-pcie` PHY refcount underflow on the error unwind (upstream candidate),
+    `0977` per-host AER/PME suppression (`aer-hang.md`, not yet validated),
+    `0978` the host-side link-recovery hook (**an experiment, never run**)
+  - `0979` tsens `__init`-after-free (upstream candidate; `&tsens` stays disabled
     because the crash fix does not answer the calibration question)
 - `package/firmware/ipq-wifi-qdm530/` (board data for `ath11k`)
 
@@ -219,7 +221,7 @@ front-panel LED mapping and driver, `modem-modes.md` for reaching/tuning the mod
 band lock, EP vs default mode), `bootloop-postmortem.md` for the watchdog debugging story,
 `pcie1-modem-combo-phy.md` for the modem-over-PCIe bring-up (the PERST-polarity fix that
 made it train, the combo-PHY/USB3 mux caveat, and the QMI-over-QRTR WAN path),
-`downlink-stall.md` for the sustained-DL stall fix (MHI ring starvation → patches 0958/0959),
+`downlink-stall.md` for the sustained-DL stall fix (MHI ring starvation → patches 0973/0974),
 `aer-hang.md` for the silent resets that track poor RF (the PCIe AER handler hanging on the
 modem's dead link → `pci=noaer pcie_ports=compat`, and the ramoops console that proved it), and
 `tools/` for helper scripts (`uart-console.sh` to open the serial console / catch U-Boot on

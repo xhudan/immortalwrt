@@ -1,0 +1,69 @@
+From: Muhammad Huda Nugroho <mhudan21@gmail.com>
+Subject: [PATCH] net: pcs: qca-uniphy: keep the reference clock enabled
+
+The external 2.5G PHY driven by this PCS (an RTL8221B on the IPQ5018 QDM530) is
+fed by the UNIPHY reference clock, and needs it before the MDIO bus is scanned.
+The PCS mac_config() that would otherwise enable it runs only after the
+boot-time PHY attach - too late, and the PHY reads back missing, so the bus
+scan finds nothing.
+
+Mark the clock CLK_IS_CRITICAL so it is enabled from registration.
+
+This is a workaround and the commit message should not pretend otherwise.
+CLK_IS_CRITICAL says "never gate this clock", while the requirement is narrower:
+one consumer needs it before it can be discovered. The reason there is nowhere
+better to put it is that the dependency has to be met BEFORE discovery - a PHY
+driver acquiring the clock in its own probe is too late, because without the
+clock the PHY cannot answer the identification reads that would create and bind
+that device at all. That makes it a bus-side concern, which is the shape
+mdio-ipq4019.c already uses for its own controller clock (clk_prepare_enable()
+in probe, before the bus is registered). Pointing that mechanism at the UNIPHY
+reference clock would misdescribe the hardware - it belongs to the PHY, not to
+the MDIO controller - and as of 6.18 nothing in drivers/net/mdio/ or
+drivers/net/phy/phy_device.c consumes a per-PHY clock before discovery, so
+there is no correct consumer to hand it to.
+
+Worth raising upstream as a missing pre-discovery clock dependency rather than
+carried as a local flag forever. Until then, dropping this makes the PHY
+disappear from the bus.
+
+Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+---
+diff --git a/drivers/net/pcs/pcs-qca-uniphy.c b/drivers/net/pcs/pcs-qca-uniphy.c
+index 5615ef6..70cc954 100644
+--- a/drivers/net/pcs/pcs-qca-uniphy.c
++++ b/drivers/net/pcs/pcs-qca-uniphy.c
+@@ -212,8 +212,31 @@ static int qca_uniphy_refclk_register(struct qca_uniphy *uniphy,
+ 	init.parent_data = &pdata;
+ 	init.num_parents = 1;
+ 	init.ops = &qca_uniphy_refclk_ops;
+-	/* always derive rate from the UNIPHY register */
+-	init.flags = CLK_GET_RATE_NOCACHE;
++	/*
++	 * Always derive the rate from the UNIPHY register, and keep the
++	 * reference clock enabled from registration.
++	 *
++	 * The external 2.5G PHY fed by this clock (an RTL8221B on the IPQ5018
++	 * QDM530) needs it before the MDIO bus is scanned, which happens early
++	 * in boot; the PCS mac_config that would otherwise enable it runs only
++	 * after the boot-time PHY attach, too late, and the PHY reads back
++	 * missing.
++	 *
++	 * CLK_IS_CRITICAL overstates that. The requirement is "one consumer
++	 * needs this clock before it can be discovered", not "this clock must
++	 * never be gated" - but there is nowhere better to express it yet. A
++	 * PHY driver taking the clock in its own probe is too late: without the
++	 * clock the PHY cannot answer the identification reads that would
++	 * create and bind that device in the first place. The dependency has to
++	 * be satisfied BEFORE discovery, which means the bus side - the shape
++	 * mdio-ipq4019.c already uses for its own controller clock, enabling it
++	 * in probe before registering the bus. Pointing that at the UNIPHY
++	 * reference clock instead would misdescribe the hardware, since it is
++	 * the PHY's clock and not the MDIO controller's, and no generic
++	 * pre-discovery mechanism exists for a per-PHY resource. So this stays
++	 * until there is one.
++	 */
++	init.flags = CLK_GET_RATE_NOCACHE | CLK_IS_CRITICAL;
+ 
+ 	uniphy->ref_clk.hw.init = &init;
+ 	uniphy->ref_clk.uniphy = uniphy;

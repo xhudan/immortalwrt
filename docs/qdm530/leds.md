@@ -22,8 +22,9 @@ triggers (`netdev`, `timer`, `default-on`, the boot/running/failsafe/upgrade ali
 board that pulse wedged the QUP I2C controller — `i2c_qup 78b7000.i2c: flush timed out` —
 and a NAND/UBI rootfs failure (`cannot open mtd rootfs` → hang) was seen alongside the ~7 s
 stall. The two co-occurred; that the stall *caused* the rootfs failure was never established,
-and there is a separate, independently diagnosed boot race in the NAND driver (patch 0955)
-that produces the same symptom.
+and there is a separate, independently diagnosed boot race in the NAND driver (upstream
+`f94c9b68bb5f`, carried here as patch 0970 until 6.18.60 absorbed it) that produces the
+same symptom.
 Left at its power-on level the chip answers I2C fine. So **leds-aw9523 does not touch the
 RSTN GPIO at all** — it only soft-resets over I2C (SOFT_RESET register) — and the DT node
 carries no `reset-gpios`. That one decision is what makes the probe reliable.

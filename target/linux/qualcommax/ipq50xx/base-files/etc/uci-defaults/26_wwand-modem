@@ -40,12 +40,18 @@
 #   - `usb_repower` is still a no-op, but NOT because the board has no modem
 #     power line - it has one, and the earlier claim that it did not was wrong.
 #     The vendor drives GPIO 29/27/28 from userspace with hard-coded numbers
-#     (no device-tree node, which is why the DTB search missed them) and its
-#     sequence power-cycles the modem; replaying it recovered a modem that had
-#     been gone from PCIe, twice, paired with patch 0963's link_recovery. The
-#     rung no-ops only because wwand has no board profile naming those GPIOs
+#     (no device-tree node, which is why the DTB search missed them). What that
+#     sequence does is only half known: replaying it from the shell turned the
+#     modem OFF and did NOT bring it back (GPIO23 1->0 and stayed; a board
+#     reboot is what restored it). The vendor's gaps are 3 ms and 70 ms and
+#     busybox `sleep` here cannot express them (FLOAT_DURATION off => whole
+#     seconds), so a correctly-timed replay has never been tried and the ON
+#     half is unproven. Earlier notes credited this sequence with recovering
+#     the modem twice; that reading did not survive the replay.
+#     The rung no-ops only because wwand has no board profile naming those GPIOs
 #     (see the userspace-GPIO section of docs/qdm530/aer-hang.md). Wiring them
-#     in is the open work, and it would make reset+repower a complete recovery.
+#     in is the open work - but it would only complete the recovery ladder if
+#     the ON half turns out to work, which is exactly what is not known.
 #
 # And the failure that drove the compressed ladder all the way to a reboot was
 # not a board fault at all: a SIM with no service. Registration that never
@@ -86,12 +92,15 @@
 # a detector that can false-positive into that is a liability however long its
 # timeout is -- 6 h would make it rarer, not safe.
 #
-# Off until there is a safe remedy to offer it. That remedy is concrete and is
-# open work: the vendor drives GPIO 29/27/28 to power-cycle the modem (see the
-# userspace-GPIO section of docs/qdm530/aer-hang.md), and replaying that
-# sequence recovered a modem that had vanished from PCIe, twice. Wiring those
-# into a wwand board profile makes can_repower() true, at which point a trip
-# repowers instead of resetting and this can be re-enabled.
+# Off until there is a safe remedy to offer it. A candidate remedy exists but is
+# NOT yet one: the vendor drives GPIO 29/27/28 as a modem power sequence (see
+# the userspace-GPIO section of docs/qdm530/aer-hang.md). Only its OFF half is
+# demonstrated here - a shell replay powered the modem down and a board reboot,
+# not the sequence, brought it back - and the vendor's 3 ms / 70 ms gaps cannot
+# be reproduced with busybox `sleep` (whole seconds only). Wiring these into a
+# wwand board profile would make can_repower() true, so doing that BEFORE the
+# ON half is proven would re-arm this detector onto a remedy that is only known
+# to turn the modem off. Prove the powered-ON replay first.
 #
 # What is lost meanwhile: a bearer that is up but dead is no longer
 # auto-recovered. The connection-attempt ladder still covers a bearer that

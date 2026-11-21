@@ -126,7 +126,7 @@ The **keeper** is the one-line `perst-gpios ... GPIO_ACTIVE_LOW` change (plus
 `usbphy1` disabled for the combo-PHY). The following were diagnostics only and have
 been reverted:
 
-- `0958-DIAG-pcie1-phy-block-dump-experiment.patch` — dumped the PHY block after init
+- `0973-DIAG-pcie1-phy-block-dump-experiment.patch` — dumped the PHY block after init
   (`PHY-DIAG l<lanes> +0x<off>: ...`), to see alive vs all-zero.
 - `CONFIG_PCIE_DW_DEBUGFS=y` in `config-6.18` — exposed `.../ltssm_status` (how
   `DETECT_QUIET` vs `L0` was read; invaluable, but experimental).

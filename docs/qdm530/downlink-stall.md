@@ -77,13 +77,13 @@ use **512**, not 128.
 
 ## The fix (two patches)
 
-**`0958-bus-mhi-pci_generic-sdx-ip_hw0-ring-512.patch`** — enlarge the `IP_HW0`
+**`0973-bus-mhi-pci_generic-sdx-ip_hw0-ring-512.patch`** — enlarge the `IP_HW0`
 UL/DL rings in `modem_qcom_v1` from 128 to **512** descriptors (512 × 16-byte TRE =
 8 KiB of ring; trivial DMA memory). Matches the vendor's
 `NUM_MHI_IPA_IN/OUT_RING_ELEMENTS = 512` and mainline's other SDX6x modem profiles.
 The dedicated HW DL event ring (2048) already satisfies "event ≥ 2× channel".
 
-**`0959-net-mhi_net-direct-inline-rx-refill.patch`** — refill the DL ring **in-line**
+**`0974-net-mhi_net-direct-inline-rx-refill.patch`** — refill the DL ring **in-line**
 from `mhi_net_dl_callback()`: for each buffer the device just consumed, hand one back
 immediately (`netdev_alloc_skb()` + `mhi_queue_skb()`), so the ring is replenished at
 the rate it is drained rather than whenever a worker next runs. The `delayed_work` is
@@ -104,7 +104,7 @@ Ring size alone narrows the window; the in-line refill narrows it much further, 
 does **not** close it: an allocation failure still falls back to the work, and a device
 can still outrun the host. Both together are belt-and-braces, not a guarantee.
 
-**0966: the teardown drain, and why it needs no lock.** `mhi_ndo_stop()` cancels
+**0981: the teardown drain, and why it needs no lock.** `mhi_ndo_stop()` cancels
 the refill work, but a DL completion arriving after that cancellation can re-arm
 it, and `mhi_net_dellink()` would then `free_netdev()` with the work pending -
 `mhi_net_rx_refill_work()` reaches `ndev` and `mdev` through the netdev private
@@ -157,10 +157,10 @@ Built on kernel 6.18.54 + wwand 1.7.0_pre7, flashed, heavy sustained download:
 
 ## Scope / upstreaming notes
 
-- `0959` lives under `target/linux/qualcommax/patches-6.18/`, so it only affects this
+- `0974` lives under `target/linux/qualcommax/patches-6.18/`, so it only affects this
   target's MHI modems (effectively this board). It is a general improvement and a good
   upstream candidate for `drivers/net/mhi_net.c`.
-- `0958` edits the shared `modem_qcom_v1` channel config, which the sdx55m/sdx24 profiles
+- `0973` edits the shared `modem_qcom_v1` channel config, which the sdx55m/sdx24 profiles
   in `pci_generic.c` use as well. Building only this board does **not** limit the patch's
   scope — it is a target patch, so every build of this target carries it, and any modem
   falling through to that shared profile gets the larger ring. That has not caused trouble

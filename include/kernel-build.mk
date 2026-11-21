@@ -157,6 +157,7 @@ define BuildKernel
   $(KERNEL_CONFIG_CHECK): $(STAMP_PREPARED) $(LINUX_KCONFIG_LIST) $(TOPDIR)/.config FORCE
 	@mkdir -p $(LINUX_DIR)
 	@[ -f $(STAMP_CONFIGURED) ] && [ -d $(LINUX_DIR)/user_headers ] && \
+		[ -f $(LINUX_DIR)/.config.prev ] && \
 		[ -z "$$$$(find $(KERNEL_CONFIG_DEPENDS) ! -type d \
 			-newer $(STAMP_CONFIGURED) -print -quit 2>/dev/null)" ] || \
 		touch $$@
@@ -201,6 +202,10 @@ define BuildKernel
   dtb: $(STAMP_CONFIGURED)
 	$(_SINGLE)$(KERNEL_MAKE) scripts_dtc
 	$(MAKE) -C image compile-dtb TARGET_BUILD=
+
+  dtbs_check: $(STAMP_CONFIGURED)
+	$(_SINGLE)$(KERNEL_MAKE) scripts_dtc dt_binding_schemas
+	$(MAKE) -C image check-dtb TARGET_BUILD=
 
   oldconfig menuconfig nconfig xconfig: $(STAMP_PREPARED) $(STAMP_CHECKED) FORCE
 	rm -f $(LINUX_DIR)/.config.prev

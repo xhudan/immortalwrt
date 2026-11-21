@@ -34,7 +34,7 @@ pci=noaer pcie_ports=compat
   every port service out of the way, not just AER.
 
 **A scoped replacement now exists in the tree, unvalidated.**
-`0962-PCI-qcom-do-not-claim-aer-and-pme-on-ipq5018.patch` clears
+`0977-PCI-qcom-do-not-claim-aer-and-pme-on-ipq5018.patch` clears
 `host->native_aer` and `host->native_pme` in `qcom_pcie_host_init()`, which is what
 `portdrv` consults in `get_port_device_capability()`, so the two services are never
 instantiated on this host. It has to happen there rather than after
@@ -179,6 +179,28 @@ bootloader leaves them as outputs at `29=1, 27=0, 28=0` with `23` reading high -
 which is exactly the state the vendor's sequence ends in. Numbering differs: the
 vendor's 4.4 kernel based its gpiochip at 0, while this one bases at 512, so vendor
 `gpio27` is `539` in sysfs here.
+
+#### Replaying the sequence turned the modem OFF, and did not bring it back
+
+HW, 2026-11 (after the 2026-11-01 runs below). The sequence was replayed from the shell
+against a live modem. It did not power-cycle it: `GPIO23` went from 1 to 0 and **stayed**
+there, the board dropped its connection mid-attempt (`Connection reset by peer`), and the
+modem was absent afterwards. What brought it back was a **board reboot** — which is also
+what re-initialises these pins to the bootloader's `29=1, 27=0, 28=0`.
+
+So the half that is demonstrated is the OFF half. That is consistent with the
+disassembly rather than surprising: the sequence *ends* at `27=0`, so a replay that stops
+there leaves PWRKEY unasserted.
+
+The most likely reason a shell replay cannot reproduce the vendor's result is **timing**.
+The vendor's gaps are 3 ms and 70 ms; busybox `sleep` in this image cannot express them —
+`FLOAT_DURATION` is off (`# CONFIG_BUSYBOX_DEFAULT_FLOAT_DURATION is not set`), and with
+it off `libbb` makes `duration_t` an `unsigned` and `sleep_for_duration()` a plain
+`sleep()`, i.e. whole seconds only. The replay therefore used 1 s gaps where the vendor
+uses milliseconds. That is an explanation, not a finding: nothing here tested a
+correctly-timed replay, so whether the sequence can power the modem back ON is still
+**open**. Doing it properly needs sub-millisecond gaps from C or a kernel driver, not
+`sleep`.
 
 ### Three ways to recover the modem were tried on hardware. All three failed.
 
@@ -360,7 +382,7 @@ for the local link, then `rescan`. Note also that power-cycling the modem has
 itself left it gone until mains power was pulled. Do not run this as a procedure
 on the basis of the hypothesis alone.
 
-`0963-PCI-add-a-host-bridge-link-recovery-hook.patch` adds a `->link_recover` hook to
+`0978-PCI-add-a-host-bridge-link-recovery-hook.patch` adds a `->link_recover` hook to
 `struct pci_host_bridge`, implements it in `pcie-qcom` as a deinit/PERST/init/setup_rc/
 start_link cycle that touches only SoC-local resources, and drives it from
 `mhi-pci-generic` as one operation behind a single sysfs write: quiesce MHI, cycle the
@@ -379,12 +401,16 @@ describe, and it survived several review rounds against the MHI and PCI source.
 
 **What is not:** anything about recovery by THIS revision. The hook has been run on
 hardware three times, on 2026-11-01 and all on the pre-containment revision: twice it
-reported `link up` and `link recovery complete`, each time paired with the vendor GPIO
-power-cycle sequence, and once it timed out cleanly with `-ETIMEDOUT` without hanging the
+reported `link up` and `link recovery complete`, each time paired with a replay of the
+vendor GPIO sequence, and once it timed out cleanly with `-ETIMEDOUT` without hanging the
 host. Those runs are described earlier in this document and are not invalidated — but they
 say nothing about the current revision, which has the opt-in gate and has not been
-flashed. Nor do they isolate what did the work: the two successes followed a modem power
-cycle, so the hook's own contribution is unmeasured. And the second wedge mode — link up
+flashed. Nor do they isolate what did the work, and the ambiguity is worse than it first
+looked: those two successes were read as "the hook recovered a link that a modem power
+cycle had refreshed", but the later replay above shows a shell replay of that sequence
+turning the modem **off** and keeping it off. So it is not established that a power cycle
+is what preceded those two successes, and the hook's own contribution remains unmeasured
+in either direction. And the second wedge mode — link up
 with MHI SYSERR latched while `health_check` still reads a valid vendor ID — has never
 been addressed by it at all.
 
@@ -428,7 +454,7 @@ mechanism.
 
 ### Reproducing the wedge on purpose
 
-`AT+CFUN=1,1` through `/dev/wwan0at0` (patch 0960's channel) crashes the modem's
+`AT+CFUN=1,1` through `/dev/wwan0at0` (patch 0975's channel) crashes the modem's
 PCIe link reliably, which is what `health_check` detects -- it reads the PCI
 vendor ID and only treats 0xffff/0 as death, so it catches a **link** loss and
 not an MHI-level wedge. That is why `Device died` never appeared during the
@@ -439,7 +465,7 @@ without a power cycle.
 
 ## Related
 
-- `patches-6.18/0958-bus-mhi-pci_generic-sdx-ip_hw0-ring-512.patch`,
-  `0959-net-mhi_net-direct-inline-rx-refill.patch` — see [downlink-stall.md](downlink-stall.md)
-- `patches-6.18/0960-bus-mhi-pci_generic-sdx-add-dun-at-channel.patch` — see [modem-modes.md](modem-modes.md)
+- `patches-6.18/0973-bus-mhi-pci_generic-sdx-ip_hw0-ring-512.patch`,
+  `0974-net-mhi_net-direct-inline-rx-refill.patch` — see [downlink-stall.md](downlink-stall.md)
+- `patches-6.18/0975-bus-mhi-pci_generic-sdx-add-dun-at-channel.patch` — see [modem-modes.md](modem-modes.md)
 - [bootloop-postmortem.md](bootloop-postmortem.md) — the *other* watchdog reset, fixed much earlier

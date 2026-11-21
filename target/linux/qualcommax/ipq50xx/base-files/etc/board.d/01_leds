@@ -1,4 +1,6 @@
-#!/bin/sh
+#
+# Copyright (C) 2015 OpenWrt.org
+#
 
 . /lib/functions/uci-defaults.sh
 
@@ -7,6 +9,10 @@ board_config_update
 board=$(board_name)
 
 case "$board" in
+avm,fritzbox-4050)
+	ucidef_set_led_netdev "wan" "WAN" "green:info" "wan"
+	ucidef_set_led_netdev "wlan" "WLAN" "green:wlan" "phy0-ap0" "link tx rx"
+	;;
 cmcc,pz-l8|\
 cmcc,rax3000q|\
 elecom,wrc-x3000gs2|\
@@ -30,6 +36,12 @@ linksys,mr5500)
 	ucidef_set_led_netdev "lan4-port-activity" "LAN4-PORT-ACTIVITY" "90000.mdio-1:03:amber:lan" "lan4" "tx rx"
 	ucidef_set_led_netdev "wan-port-link" "WAN-PORT-LINK" "90000.mdio-1:04:green:wan" "wan" "link_10 link_100 link_1000"
 	ucidef_set_led_netdev "wan-port-activity" "WAN-PORT-ACTIVITY" "90000.mdio-1:04:amber:wan" "wan" "tx rx"
+	;;
+mercusys,mr80x-v2)
+	ucidef_set_led_netdev "wan" "WAN" "green:wan" "wan" "tx rx link"
+	ucidef_set_led_netdev "lan1" "LAN1" "green:lan-1" "lan1" "tx rx link"
+	ucidef_set_led_netdev "lan2" "LAN2" "green:lan-2" "lan2" "tx rx link"
+	ucidef_set_led_netdev "lan3" "LAN3" "green:lan-3" "lan3" "tx rx link"
 	;;
 tplink,archer-ax55-v1)
 	ucidef_set_led_netdev "lan" "LAN" "green:lan" "br-lan"
@@ -55,6 +67,13 @@ unbranded,qdm530)
 	# The wan LED follows the wan interface; the mobile (signal) and status
 	# LEDs are driven from modem state by /etc/init.d/qdm530-modem-leds.
 	ucidef_set_led_netdev "wan" "WAN" "green:wan" "wwand0"
+	;;
+xunison,exigo-hub-d50-5g)
+	ucidef_set_led_netdev "wan" "WAN" "green:wan" "wan" "link tx rx"
+	ucidef_set_led_netdev "internet" "Internet" "green:wan-online" "wwan0" "link"
+	;;
+zte,t5400)
+	ucidef_set_led_netdev "wan" "WAN" "white:status" "eth0" "link"
 	;;
 esac
 

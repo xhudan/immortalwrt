@@ -45,7 +45,7 @@ stale handle: `adb kill-server && adb devices`.
 The board **does** have an AT tty, exposed over MHI. The modem offers an AT port on the
 **DUN channel (MHI 32/33)** — on the modem a `port_bridge smd7 mhi_pipe_32` waits for the
 host to open it — but the generic `modem_qcom_v1` MHI channel table did not declare 32/33,
-so the host never opened it. Patch `0960-bus-mhi-pci_generic-sdx-add-dun-at-channel.patch`
+so the host never opened it. Patch `0975-bus-mhi-pci_generic-sdx-add-dun-at-channel.patch`
 adds `DUN` 32/33; `mhi_wwan_ctrl` then maps it to `WWAN_PORT_AT` and creates
 `/dev/wwan0at0` (`dmesg`: `wwan wwan0: port wwan0at0 attached`). HW-verified on the
 RG520N-EB — needs `kmod-mhi-wwan-ctrl` + `kmod-mhi-pci-generic` (both in the image).

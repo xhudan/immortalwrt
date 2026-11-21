@@ -79,7 +79,7 @@
 		 *
 		 * This used to be handled with "pci=noaer pcie_ports=compat" here, which
 		 * works but is a sledgehammer: it disables AER machine-wide and puts EVERY
-		 * port service on EVERY host into compat mode. Patch 0962 does it per host
+		 * port service on EVERY host into compat mode. Patch 0977 does it per host
 		 * instead - qcom_pcie_host_init() clears host->native_aer and
 		 * native_pme for the IPQ5018 cfg, before pci_host_probe() creates the
 		 * service devices - so AER and PME are never instantiated on these two
@@ -90,15 +90,15 @@
 		 * The arguments are OFF, but measure what that actually changes before
 		 * trusting the equivalence (HW 2026-11-01, both states flashed):
 		 *   with them:    `pcieport` binds 0 root ports - portdrv never probes
-		 *   without them: `pcieport` binds both - 0962 only keeps the AER and PME
+		 *   without them: `pcieport` binds both - 0977 only keeps the AER and PME
 		 *                 SERVICES from registering, it does not stop portdrv
-		 * So 0962 is not equivalent on that point. What it costs is NOT established:
+		 * So 0977 is not equivalent on that point. What it costs is NOT established:
 		 * zero port services are instantiated either way, so portdrv binding with
-		 * nothing to offer has no demonstrated consequence. Nor is 0962 disproven -
+		 * nothing to offer has no demonstrated consequence. Nor is 0977 disproven -
 		 * a modem death took the link down under it without hanging the host, which
 		 * is consistent with the suppression working, though not causal isolation
 		 * (a settled dead link is the easy case; a walk racing link loss is the one
-		 * that bit us). What it still needs is a spontaneous modem SSR under 0962
+		 * that bit us). What it still needs is a spontaneous modem SSR under 0977
 		 * with no silent reset.
 		 *
 		 * Do NOT use these as checks: /sys/bus/pci_express/devices is empty either
@@ -122,11 +122,11 @@
 		 * it. Keep the two apart when judging either change.
 		 *
 		 * Do NOT use /sys/bus/pci_express/devices as a check. It is empty on this
-		 * board either way - with 0962 because AER and PME are the only services
+		 * board either way - with 0977 because AER and PME are the only services
 		 * these ports offer, and in compat mode because portdrv is off - so it
 		 * cannot tell the two apart. The same goes for the aer_dev_* files, which
 		 * the PCI core creates for any AER-capable device. The failure mode if
-		 * 0962 does not hold is the silent reset above, on the NEXT modem SSR and
+		 * 0977 does not hold is the silent reset above, on the NEXT modem SSR and
 		 * not necessarily at boot: a reboot with no panic record in pstore.
 		 * To revert: put " pci=noaer pcie_ports=compat" back on the line below.
 		 *
@@ -138,7 +138,7 @@
 		 * pci_try_reset_function()) and why the endpoint has no reset_method sysfs
 		 * attribute. And nothing here recovers the MODEM: HW-tested 2026-10-29, a
 		 * host-side re-bind and a PCI remove+rescan free a daemon wedged on the dead
-		 * link but do NOT clear an MHI SYSERR latch. Patch 0963 was executed once on
+		 * link but do NOT clear an MHI SYSERR latch. Patch 0978 was executed once on
 		 * hardware (2026-11-01) against an already-dead link: it quiesced, re-cycled
 		 * the link, timed out after 30 s and returned -ETIMEDOUT without hanging the
 		 * host - but the link did not come back, so it is still unproven as a
