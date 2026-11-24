@@ -47,6 +47,18 @@ line.
  before it), so this one applies to mainline only with fuzz.]
 
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+
+[Submitted 2026-11-21 to linux-pm/linux-arm-msm as
+ <20261121113605.jDNtw%mhudan21@gmail.com>, as a nine-function patch generated
+ against mainline (see the note above on init_8952). The automated reviewer
+ (sashiko-bot@kernel.org) reported "No issues found" and its baseline run
+ applied it to linux-pm/thermal (22139b5a4635) - the maintainer tree, not just
+ mainline. No human has replied; that is silence, not acceptance.
+
+ The first send attempt never reached the list: the mail client attached an HTML
+ part and mlmmj rejected it outright. Kernel lists take plain text only. The
+ resend went through s-nail with mime-encoding=8bit, verified byte-clean by
+ reapplying the received message with fuzz zero before sending.]
 ---
 --- a/drivers/thermal/qcom/tsens.c
 +++ b/drivers/thermal/qcom/tsens.c

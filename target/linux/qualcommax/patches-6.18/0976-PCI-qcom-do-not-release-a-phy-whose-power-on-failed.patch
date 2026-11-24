@@ -62,7 +62,26 @@ Unwind with list_for_each_entry_continue_reverse() so only the ports that were
 successfully powered on are powered off, and fail the phy_set_mode_ext() case
 the same way instead of leaking the ports already acquired.
 
+Fixes: a2fbecdbbb9d ("PCI: qcom: Add support for parsing the new Root Port binding")
 Signed-off-by: Muhammad Huda Nugroho <mhudan21@gmail.com>
+
+[Submitted 2026-11-21 to linux-pci/linux-arm-msm as
+ <20261121113721.7OL6u%mhudan21@gmail.com>. NOT reviewed by a human yet - the
+ only reply is from sashiko-bot@kernel.org, the Linux Foundation's automated
+ reviewer (gemini-4-argon). It found one Low item, the missing Fixes: tag above,
+ and nothing else; it did not dispute the mechanism or the fix. A bot's silence
+ on the rest is not review, and its one finding is not rejection.
+
+ The Fixes: target was NOT taken on the bot's word. Read a2fbecdbbb9d directly:
+ before it, qcom_pcie_host_init() called phy_power_on(pcie->phy) and simply
+ returned on failure. That commit introduced BOTH qcom_pcie_phy_power_off() and
+ the call to it from the phy_power_on() failure path - that call is the release
+ of a never-acquired reference this patch removes. So it introduced the bug
+ rather than inheriting it, and the tag is correct.
+
+ v1 applied cleanly to linux-next/HEAD (909ef7a9a30f) in the bot's baseline run.
+ A v2 carrying only the Fixes: tag is prepared but deliberately NOT sent yet:
+ respinning within days for a bot's nit risks a v3 once a human replies.]
 ---
 --- a/drivers/pci/controller/dwc/pcie-qcom.c
 +++ b/drivers/pci/controller/dwc/pcie-qcom.c
